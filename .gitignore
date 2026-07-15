@@ -1,0 +1,21 @@
+# Build outputs
+build/
+*.class
+*.jar
+*.aar
+
+# Gradle
+.gradle/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Release uploads (use GitHub Releases instead)
+releases/
