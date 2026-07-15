@@ -1,3 +1,7 @@
+android {
+    namespace = "com.sexalarab.plugin"
+}
+
 version = 1
 
 cloudstream {
@@ -6,5 +10,4 @@ cloudstream {
     status = 1
     tvTypes = listOf("NSFW")
     language = "ar"
-    iconUrl = "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/main/icons/SexAlArab.png"
 }
