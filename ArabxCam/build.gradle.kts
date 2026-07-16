@@ -1,11 +1,11 @@
 android {
-    namespace = "com.sexalarab.plugin"
+    namespace = "com.arabx.plugin"
 }
 
 version = 1
 
 cloudstream {
-    description = "إضافة سكس العرب - أفلام إباحية عربية مترجمة"
+    description = "إضافة ArabX - أفلام إباحية عربية"
     authors = listOf("hamedhani1998")
     status = 1
     tvTypes = listOf("NSFW")

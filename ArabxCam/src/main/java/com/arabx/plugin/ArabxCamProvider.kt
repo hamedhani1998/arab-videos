@@ -1,13 +1,13 @@
-package com.sexalarab.plugin
+package com.arabx.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class SexAlArabProvider : MainAPI() {
-    override var name = "سكس العرب"
-    override var mainUrl = "https://sexalarab.com"
+class ArabxCamProvider : MainAPI() {
+    override var name = "ArabX"
+    override var mainUrl = "https://www.arabx.cam"
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
@@ -16,10 +16,10 @@ class SexAlArabProvider : MainAPI() {
         "latest-updates/" to "احدث الافلام",
         "top-rated/" to "افضل الافلام",
         "most-popular/" to "الاعلى مشاهدة",
-        "category/سكس-مترجم/" to "مترجم",
-        "category/سكس-امهات/" to "أمهات",
-        "category/سكس-محارم/" to "محارم",
-        "category/سكس-نيك-عربي/" to "عربي",
+        "categories/سكس-مترجم/" to "مترجم",
+        "categories/سكس-امهات-مترجم/" to "أمهات",
+        "categories/سكس-محارم/" to "محارم",
+        "categories/سكس-اخوات/" to "اخوات",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -32,7 +32,7 @@ class SexAlArabProvider : MainAPI() {
                     val href = a.attr("href") ?: return@mapNotNull null
                     val title = item.selectFirst("strong.title")?.text()?.trim()
                         ?: a.attr("title")
-                    val poster = item.selectFirst("img.thumb")?.let {
+                    val poster = item.selectFirst("img.thumb, img.lazy-load")?.let {
                         it.attr("data-original").ifBlank { it.attr("src") }
                     }
                     val rating = item.selectFirst("div.rating")?.text()?.trim()?.replace("%", "")
@@ -62,7 +62,7 @@ class SexAlArabProvider : MainAPI() {
                     val href = a.attr("href") ?: return@mapNotNull null
                     val title = item.selectFirst("strong.title")?.text()?.trim()
                         ?: a.attr("title")
-                    val poster = item.selectFirst("img.thumb")?.let {
+                    val poster = item.selectFirst("img.thumb, img.lazy-load")?.let {
                         it.attr("data-original").ifBlank { it.attr("src") }
                     }
 

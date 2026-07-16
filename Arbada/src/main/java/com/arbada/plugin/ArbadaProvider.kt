@@ -1,13 +1,13 @@
-package com.sexalarab.plugin
+package com.arbada.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
-class SexAlArabProvider : MainAPI() {
-    override var name = "سكس العرب"
-    override var mainUrl = "https://sexalarab.com"
+class ArbadaProvider : MainAPI() {
+    override var name = "العربدة"
+    override var mainUrl = "https://www.arbada.com"
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
@@ -16,10 +16,8 @@ class SexAlArabProvider : MainAPI() {
         "latest-updates/" to "احدث الافلام",
         "top-rated/" to "افضل الافلام",
         "most-popular/" to "الاعلى مشاهدة",
-        "category/سكس-مترجم/" to "مترجم",
-        "category/سكس-امهات/" to "أمهات",
-        "category/سكس-محارم/" to "محارم",
-        "category/سكس-نيك-عربي/" to "عربي",
+        "categories/افلام-سكس-عربي/" to "عربي",
+        "categories/افلام-سكس-مترجم-عربي/" to "مترجم",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
