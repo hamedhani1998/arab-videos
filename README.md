@@ -1,58 +1,46 @@
-**⚠️ This is currently under development, dont use it yet if you're not comfortable with constantly merging new changes**
+# My Cloudstream Extensions
 
-# `Cloudstream3 Plugin Repo Template`
+مستودع الإضافات الخاصة لـ Cloudstream
 
-Template for a [Cloudstream3](https://github.com/recloudstream) plugin repo
+## التثبيت
 
-**⚠️ Make sure you check "Include all branches" when using this template**
+1. افتح Cloudstream
+2. اذهب إلى Settings > Extensions
+3. اضغط على "Add Repository"
+4. أدخل هذا الرابط:
+```
+https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/main/index.json
+```
+5. اضغط "OK"
+6. اذهب إلى Extensions وثبّت الإضافات المتاحة
 
- 
-## Getting started with writing your first plugin
+## الإضافات المتاحة
 
-This template includes 1 example plugin.
+| الإضافة | الوصف | الحالة |
+|---------|-------|--------|
+| أفلامك1 | أفلام إباحية عربية | ✅ |
+| ArabX | أفلام إباحية عربية | ✅ |
+| العربدة | أفلام إباحية عربية | ✅ |
+| سكس العرب | أفلام إباحية عربية مترجمة | ✅ |
 
-1. Open the root build.gradle.kts, read the comments and replace all the placeholders
-2. Familiarize yourself with the project structure. Most files are commented
-3. Build or deploy your first plugin using:
-   - Windows: `.\gradlew.bat ExampleProvider:make` or `.\gradlew.bat ExampleProvider:deployWithAdb`
-   - Linux & Mac: `./gradlew ExampleProvider:make` or `./gradlew ExampleProvider:deployWithAdb`
+## للمساهمة
 
+1. Fork هذا المستودع
+2. أضف إضافتك الجديدة
+3. أرسل Pull Request
 
-## Granting All Files Access on Newer Android Devices
+## للتطوير
 
-For local plugin testing, you need to grant the app "All Files Access" on newer Android devices (Android 11 and above). Here’s how to do it:
+### بناء الإضافة
 
-### Using ADB
+```bash
+cd SexAlArab
+gradle build
+```
 
-* `adb shell appops set --uid PACKAGE_NAME MANAGE_EXTERNAL_STORAGE allow`
-* Replace `PACKAGE_NAME` with the name of the package for the Cloudstream3 version you are using:
-   - debug: `com.lagradost.cloudstream3.prerelease.debug`
-   - prerelease: `com.lagradost.cloudstream3.prerelease`
-   - stable: `com.lagradost.cloudstream3`
+### رفع الإصدار الجديد
 
-### Manually
-
-1. **Open Settings**: Go to your device’s Settings menu.
-
-2. **Navigate to Special Access**:
-   - Tap on "Apps & notifications" or "Apps".
-   - Select "Special app access" or "Special access".
-
-3. **Select All Files Access**:
-   - Tap on "All files access".
-   - It may be under the three vertical dots menu towards the top of the screen.
-
-4. **Grant Access to the App**: Find the app in the list and tap on it to toggle it, if it is not already enabled.
-
-6. **Restart the App**: Close and reopen the app to apply the changes.
-
-
-## License
-
-Everything in this repo is released into the public domain. You may use it however you want with no conditions whatsoever
-
-
-## Attribution
-
-This template as well as the gradle plugin and the whole plugin system is **heavily** based on [Aliucord](https://github.com/Aliucord).
-*Go use it, it's a great mobile discord client mod!*
+1. قم ببناء الإضافة
+2. أنشئ إصدار جديد في GitHub Releases
+3. ارفع ملف `.cs3` كمرفق
+4. حدّث `index.min.json` بالإصدار الجديد
