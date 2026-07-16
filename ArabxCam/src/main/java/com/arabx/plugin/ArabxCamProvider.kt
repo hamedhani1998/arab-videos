@@ -55,7 +55,7 @@ class ArabxCamProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val doc = app.get("$mainUrl/search/$query/", referer = mainUrl).document
+            val doc = app.get("$mainUrl/search/videos/?q=$query", referer = mainUrl).document
             doc.select("div.item").mapNotNull { item ->
                 try {
                     val a = item.selectFirst("a") ?: return@mapNotNull null
@@ -106,71 +106,141 @@ class ArabxCamProvider : MainAPI() {
     ): Boolean {
         return try {
             val doc = app.get(data, referer = mainUrl).document
+            
+            // Method 1: Check for flashvars (old format)
             val script = doc.select("script").map { it.html() }
-                .firstOrNull { it.contains("flashvars") } ?: return false
-
-            val videoUrl = extractFlashvarValue(script, "video_url")
-            val videoAltUrl = extractFlashvarValue(script, "video_alt_url")
-            val videoAltUrl2 = extractFlashvarValue(script, "video_alt_url2")
-            val videoUrlText = extractFlashvarValue(script, "video_url_text") ?: "360p"
-            val videoAltUrlText = extractFlashvarValue(script, "video_alt_url_text") ?: "480p"
-            val videoAltUrl2Text = extractFlashvarValue(script, "video_alt_url2_text") ?: "720p"
-
-            val referer = mainUrl
-
-            videoUrl?.let { url ->
-                val cleanUrl = cleanVideoUrl(url)
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = cleanUrl,
-                        type = ExtractorLinkType.VIDEO,
-                    ) {
-                        this.referer = referer
-                        this.quality = getQualityFromName(videoUrlText)
-                    }
-                )
+                .firstOrNull { it.contains("flashvars") }
+            
+            if (script != null) {
+                extractFlashvarsLinks(script, data, callback)
+                return true
             }
-
-            videoAltUrl?.let { url ->
-                val cleanUrl = cleanVideoUrl(url)
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = cleanUrl,
-                        type = ExtractorLinkType.VIDEO,
-                    ) {
-                        this.referer = referer
-                        this.quality = getQualityFromName(videoAltUrlText)
-                    }
-                )
+            
+            // Method 2: Check for iframe embed (new format)
+            val iframe = doc.selectFirst("div.embed-wrap iframe, iframe[src*=playeriz], iframe[src*=embed]")
+            if (iframe != null) {
+                val iframeUrl = iframe.attr("src")
+                if (iframeUrl.isNotBlank()) {
+                    // Try to fetch the iframe page to get direct video URL
+                    try {
+                        val iframeDoc = app.get(iframeUrl, referer = data).document
+                        val iframeScript = iframeDoc.select("script").map { it.html() }
+                            .firstOrNull { it.contains("video_url") || it.contains("flashvars") }
+                        
+                        if (iframeScript != null) {
+                            extractFlashvarsLinks(iframeScript, data, callback)
+                            return true
+                        }
+                    } catch (_: Exception) {}
+                    
+                    // If we can't extract from iframe, report the iframe URL as a link
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = name,
+                            url = iframeUrl,
+                            type = ExtractorLinkType.VIDEO,
+                        ) {
+                            this.referer = data
+                            this.quality = getQualityFromName("720p")
+                        }
+                    )
+                    return true
+                }
             }
-
-            videoAltUrl2?.let { url ->
-                val cleanUrl = cleanVideoUrl(url)
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = cleanUrl,
-                        type = ExtractorLinkType.VIDEO,
-                    ) {
-                        this.referer = referer
-                        this.quality = getQualityFromName(videoAltUrl2Text)
+            
+            // Method 3: Check for HTML5 video sources
+            val videoSources = doc.select("video source, source[type*=video]")
+            if (videoSources.isNotEmpty()) {
+                videoSources.forEach { source ->
+                    val src = source.attr("src")
+                    val quality = source.attr("title").ifBlank {
+                        when {
+                            src.contains("720p") -> "720p"
+                            src.contains("480p") -> "480p"
+                            src.contains("360p") -> "360p"
+                            src.contains("240p") -> "240p"
+                            else -> "360p"
+                        }
                     }
-                )
+                    if (src.isNotBlank()) {
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = name,
+                                url = src,
+                                type = ExtractorLinkType.VIDEO,
+                            ) {
+                                this.referer = data
+                                this.quality = getQualityFromName(quality)
+                            }
+                        )
+                    }
+                }
+                return true
             }
-
-            true
+            
+            false
         } catch (e: Exception) {
             false
         }
     }
 
+    private suspend fun extractFlashvarsLinks(script: String, referer: String, callback: (ExtractorLink) -> Unit) {
+        val videoUrl = extractFlashvarValue(script, "video_url")
+        val videoAltUrl = extractFlashvarValue(script, "video_alt_url")
+        val videoAltUrl2 = extractFlashvarValue(script, "video_alt_url2")
+        val videoUrlText = extractFlashvarValue(script, "video_url_text") ?: "360p"
+        val videoAltUrlText = extractFlashvarValue(script, "video_alt_url_text") ?: "480p"
+        val videoAltUrl2Text = extractFlashvarValue(script, "video_alt_url2_text") ?: "720p"
+
+        videoUrl?.let { url ->
+            val cleanUrl = cleanVideoUrl(url)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = cleanUrl,
+                    type = ExtractorLinkType.VIDEO,
+                ) {
+                    this.referer = mainUrl
+                    this.quality = getQualityFromName(videoUrlText)
+                }
+            )
+        }
+
+        videoAltUrl?.let { url ->
+            val cleanUrl = cleanVideoUrl(url)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = cleanUrl,
+                    type = ExtractorLinkType.VIDEO,
+                ) {
+                    this.referer = mainUrl
+                    this.quality = getQualityFromName(videoAltUrlText)
+                }
+            )
+        }
+
+        videoAltUrl2?.let { url ->
+            val cleanUrl = cleanVideoUrl(url)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = cleanUrl,
+                    type = ExtractorLinkType.VIDEO,
+                ) {
+                    this.referer = mainUrl
+                    this.quality = getQualityFromName(videoAltUrl2Text)
+                }
+            )
+        }
+    }
+
     private fun extractFlashvarValue(script: String, key: String): String? {
-        // Try multiple patterns for better compatibility
         val patterns = listOf(
             """$key\s*[:=]\s*['"]([^'"]+)['"]""",
             """$key\s*:\s*["']([^"']+)["']""",
