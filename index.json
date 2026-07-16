@@ -1,9 +1,58 @@
-{
-  "iconUrl": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/main/icon.svg",
-  "name": "My Cloudstream Extensions",
-  "description": "مستودع الإضافات الخاصة لـ Cloudstream",
-  "manifestVersion": 1,
-  "pluginLists": [
-    "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/main/index.min.json"
-  ]
-}
+[
+    {
+        "name": "ArabxCam",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/ArabxCam.cs3",
+        "size": 15952,
+        "sha256": "4c2aa9211940485b42420009c9fa3ba827f02bdfc2e1d172772b5666e855674b",
+        "changelog": ""
+    },
+    {
+        "name": "Arbada",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/Arbada.cs3",
+        "size": 15914,
+        "sha256": "a7d64077e1c6c0a6325cdef016e46d84784b8601a2988465be47059efc22d127",
+        "changelog": ""
+    },
+    {
+        "name": "FagerNeek",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/FagerNeek.cs3",
+        "size": 21353,
+        "sha256": "3933040e1f6010c2fb2dee6d491720dfb1941bdbde0a803c8ce6022bf7aaa222",
+        "changelog": ""
+    },
+    {
+        "name": "Sex6x",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/Sex6x.cs3",
+        "size": 22563,
+        "sha256": "1be2ce0082e519561f966ec2ee32c8b00713960af301085739a73a28cce2f829",
+        "changelog": ""
+    },
+    {
+        "name": "SexAlArab",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/SexAlArab.cs3",
+        "size": 16140,
+        "sha256": "03ec1352be4feb5d6da9fab9a7407c75eadd667a1595887a96274612a86ed2f5",
+        "changelog": ""
+    },
+    {
+        "name": "SexSatee",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/SexSatee.cs3",
+        "size": 21763,
+        "sha256": "1e99b49ab4abb2dde617f91e399d9193f3444fa5d5a8ff30b600c144c7ce6c71",
+        "changelog": ""
+    },
+    {
+        "name": "Zebawy",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/Zebawy.cs3",
+        "size": 21467,
+        "sha256": "6547518cd90950878d57cecc93011d7e562d814cecb9f240027407fee5d56b93",
+        "changelog": ""
+    },
+    {
+        "name": "Zebzob",
+        "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/Zebzob.cs3",
+        "size": 21405,
+        "sha256": "bb85fc6c85024d8abcf8b9836615fcc5fd40f5d0fdcb36710885de65867d4c16",
+        "changelog": ""
+    }
+]
