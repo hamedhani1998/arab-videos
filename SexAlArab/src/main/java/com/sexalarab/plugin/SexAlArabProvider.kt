@@ -60,7 +60,9 @@ class SexAlArabProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val doc = app.get(url, referer = mainUrl).document
-            val title = doc.selectFirst("h1.htitle")?.text()?.trim() ?: doc.title().substringBefore(" -").trim()
+            val title = doc.selectFirst("h1.htitle")?.text()?.trim()
+                ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+                ?: doc.title().substringBefore(" -").trim()
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             val description = doc.selectFirst("meta[name=description]")?.attr("content")
             val tags = doc.select("meta[name=keywords]")?.attr("content")?.split(",")?.map { it.trim() }?.take(6)
@@ -74,38 +76,41 @@ class SexAlArabProvider : MainAPI() {
     ): Boolean {
         return try {
             val doc = app.get(data, referer = mainUrl).document
+            var found = false
             
-            // Method 1: HTML5 video sources (fastest)
+            // Method 1: HTML5 video sources
             doc.select("video source").forEach { src ->
                 val url = src.attr("src")
-                val quality = src.attr("title").ifBlank { qual(url) }
-                if (url.isNotBlank()) cb(url, quality, mainUrl, callback)
+                val quality = src.attr("title").ifBlank { qlt(url) }
+                if (url.isNotBlank()) { lnk(url, quality, callback); found = true }
             }
-            if (doc.select("video source").isNotEmpty()) return true
+            if (found) return true
             
             // Method 2: flashvars
-            val script = doc.select("script").map { it.html() }.firstOrNull { it.contains("flashvars") }
-            if (script != null) {
-                val v1 = regex(script, "video_url"); val v2 = regex(script, "video_alt_url"); val v3 = regex(script, "video_alt_url2")
-                val q1 = regex(script, "video_url_text") ?: "360p"; val q2 = regex(script, "video_alt_url_text") ?: "480p"; val q3 = regex(script, "video_alt_url2_text") ?: "720p"
-                v1?.let { cb(it, q1, mainUrl, callback) }; v2?.let { cb(it, q2, mainUrl, callback) }; v3?.let { cb(it, q3, mainUrl, callback) }
-                if (v1 != null || v2 != null || v3 != null) return true
+            doc.select("script").forEach { element ->
+                val script = element.html()
+                if (script.contains("flashvars")) {
+                    val v1 = rgx(script, "video_url"); val v2 = rgx(script, "video_alt_url"); val v3 = rgx(script, "video_alt_url2")
+                    val q1 = rgx(script, "video_url_text") ?: "360p"; val q2 = rgx(script, "video_alt_url_text") ?: "480p"; val q3 = rgx(script, "video_alt_url2_text") ?: "720p"
+                    v1?.let { lnk(it, q1, callback); found = true }; v2?.let { lnk(it, q2, callback); found = true }; v3?.let { lnk(it, q3, callback); found = true }
+                }
             }
+            if (found) return true
             
             // Method 3: iframe
             val iframe = doc.selectFirst("div.embed-wrap iframe, iframe[src*=embed]")
-            if (iframe != null) { cb(iframe.attr("src"), "720p", data, callback); return true }
+            if (iframe != null) { lnk(iframe.attr("src"), "720p", callback); return true }
             false
         } catch (e: Exception) { false }
     }
 
-    private fun regex(script: String, key: String): String? {
-        val match = Regex("""$key\s*[:=]\s*['"]([^'"]+)['"]""").find(script)
-        return match?.groupValues?.get(1)?.ifBlank { null }
+    private fun rgx(script: String, key: String): String? {
+        val match = Regex("""$key\s*[:=]\s*['"]([^'"]+)['"]""").find(script) ?: return null
+        return match.groupValues[1].ifBlank { null }
     }
-    private fun qual(url: String): String = when { url.contains("720p") -> "720p"; url.contains("480p") -> "480p"; url.contains("360p") -> "360p"; url.contains("1080p") -> "1080p"; else -> "360p" }
-    private fun clean(url: String): String = when { url.startsWith("function/0/") -> url.removePrefix("function/0/"); url.startsWith("//") -> "https:$url"; else -> url }
-    private suspend fun cb(url: String, quality: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        callback(newExtractorLink(source = name, name = name, url = clean(url), type = ExtractorLinkType.VIDEO) { this.referer = mainUrl; this.quality = getQualityFromName(quality) })
+    private fun qlt(url: String): String = when { url.contains("720p") -> "720p"; url.contains("480p") -> "480p"; url.contains("360p") -> "360p"; url.contains("1080p") -> "1080p"; else -> "360p" }
+    private fun cln(url: String): String = when { url.startsWith("function/0/") -> url.removePrefix("function/0/"); url.startsWith("//") -> "https:$url"; else -> url }
+    private suspend fun lnk(url: String, quality: String, callback: (ExtractorLink) -> Unit) {
+        callback(newExtractorLink(source = name, name = name, url = cln(url), type = ExtractorLinkType.VIDEO) { this.referer = mainUrl; this.quality = getQualityFromName(quality) })
     }
 }
