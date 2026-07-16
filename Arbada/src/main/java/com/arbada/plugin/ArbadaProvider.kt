@@ -109,7 +109,7 @@ class ArbadaProvider : MainAPI() {
                 return true
             }
 
-            // Method 3: HTML5 video sources (DON'T return early - continue to flashvars)
+            // Method 3: HTML5 video sources (DON'T return early)
             doc.select("video source, video").forEach { src ->
                 val url = src.attr("src")
                 if (url.isNotBlank()) {

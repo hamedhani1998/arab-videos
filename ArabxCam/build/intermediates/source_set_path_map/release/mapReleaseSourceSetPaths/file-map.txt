@@ -1,0 +1,7 @@
+com.arabx.plugin.ArabxCam-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\build\generated\res\pngs\release
+com.arabx.plugin.ArabxCam-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\build\generated\res\resValues\release
+com.arabx.plugin.ArabxCam-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.arabx.plugin.ArabxCam-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.arabx.plugin.ArabxCam-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\build\intermediates\merged_res\release\mergeReleaseResources
+com.arabx.plugin.ArabxCam-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\src\main\res
+com.arabx.plugin.ArabxCam-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabxCam\src\release\res

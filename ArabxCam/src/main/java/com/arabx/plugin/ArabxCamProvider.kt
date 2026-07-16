@@ -137,7 +137,6 @@ class ArabxCamProvider : MainAPI() {
 
     private fun extractFlashvars(script: String): List<Pair<String, String>> {
         val results = mutableListOf<Pair<String, String>>()
-        // Match flashvars block
         val flashvarsPattern = Regex("""flashvars\s*[=:]\s*\{([^}]+)\}""", RegexOption.DOT_MATCHES_ALL)
         val block = flashvarsPattern.find(script)?.groupValues?.get(1) ?: return results
 
