@@ -121,12 +121,34 @@ class ArabxCamProvider : MainAPI() {
             }
             if (found) return true
 
-            // Method 4: iframe embed
-            val iframe = doc.selectFirst("div.embed-wrap iframe, iframe[src*=embed], iframe[src*=video]")
+            // Method 4: iframe embed - follow iframe to extract actual video URL
+            val iframe = doc.selectFirst("div.embed-wrap iframe, iframe[src*=embed], iframe[src*=video], iframe[src*=playeriz]")
             if (iframe != null) {
                 val iframeUrl = iframe.attr("src")
                 if (iframeUrl.isNotBlank()) {
-                    lnk(iframeUrl, "720p", callback)
+                    val iframeDoc = app.get(iframeUrl, referer = data).document
+                    val iframeScript = iframeDoc.select("script").joinToString("\n") { it.html() }
+                    
+                    // Try to find video URL in iframe
+                    val videoUrl = Regex("""(?:file|video_url|source|src)\s*[:=]\s*["'](https?://[^"']+\.mp4[^"']*)["']""").find(iframeScript)?.groupValues?.get(1)
+                    if (!videoUrl.isNullOrBlank()) {
+                        lnk(videoUrl, "360p", callback)
+                        val altVideoUrl = Regex("""(?:video_alt_url|source_alt)\s*[:=]\s*["'](https?://[^"']+\.mp4[^"']*)["']""").find(iframeScript)?.groupValues?.get(1)
+                        if (!altVideoUrl.isNullOrBlank()) lnk(altVideoUrl, "480p", callback)
+                        val altVideoUrl2 = Regex("""(?:video_alt_url2|source2)\s*[:=]\s*["'](https?://[^"']+\.mp4[^"']*)["']""").find(iframeScript)?.groupValues?.get(1)
+                        if (!altVideoUrl2.isNullOrBlank()) lnk(altVideoUrl2, "720p", callback)
+                        return true
+                    }
+                    
+                    // Try m3u8 in iframe
+                    val m3u8Url = Regex("""(https?://[^"']+\.m3u8[^"']*)""").find(iframeScript)?.groupValues?.get(1)
+                    if (!m3u8Url.isNullOrBlank()) {
+                        lnk(m3u8Url, "360p", callback)
+                        return true
+                    }
+                    
+                    // Fallback: use iframe URL directly
+                    lnk(iframeUrl, "360p", callback)
                     return true
                 }
             }
@@ -137,6 +159,7 @@ class ArabxCamProvider : MainAPI() {
 
     private fun extractFlashvars(script: String): List<Pair<String, String>> {
         val results = mutableListOf<Pair<String, String>>()
+        // Match flashvars block
         val flashvarsPattern = Regex("""flashvars\s*[=:]\s*\{([^}]+)\}""", RegexOption.DOT_MATCHES_ALL)
         val block = flashvarsPattern.find(script)?.groupValues?.get(1) ?: return results
 
