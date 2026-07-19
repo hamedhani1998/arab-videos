@@ -1,0 +1,7 @@
+com.sexarabfun.plugin.SexArabFun-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\build\generated\res\pngs\release
+com.sexarabfun.plugin.SexArabFun-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\build\generated\res\resValues\release
+com.sexarabfun.plugin.SexArabFun-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.sexarabfun.plugin.SexArabFun-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.sexarabfun.plugin.SexArabFun-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\build\intermediates\merged_res\release\mergeReleaseResources
+com.sexarabfun.plugin.SexArabFun-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\src\main\res
+com.sexarabfun.plugin.SexArabFun-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexArabFun\src\release\res

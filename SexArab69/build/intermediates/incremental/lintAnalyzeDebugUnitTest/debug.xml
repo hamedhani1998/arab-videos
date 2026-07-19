@@ -1,0 +1,26 @@
+<variant
+    name="debug"
+    package="com.sexarab69.plugin"
+    minSdkVersion="21"
+    targetSdkVersion="35"
+    debuggable="true"
+    mergedManifest="build\intermediates\merged_manifest\debug\processDebugManifest\AndroidManifest.xml"
+    partialResultsDir="build\intermediates\unit_test_lint_partial_results\debug\lintAnalyzeDebugUnitTest\out"
+    desugaredMethodsFiles="C:\Users\yemen\.gradle\caches\9.6.1\transforms\549b39068585d98c0e7f5a70d69a013e\transformed\D8BackportedDesugaredMethods.txt">
+  <buildFeatures
+      namespacing="REQUIRED"/>
+  <sourceProviders>
+  </sourceProviders>
+  <testSourceProviders>
+    <sourceProvider
+        manifests="src\test\AndroidManifest.xml"
+        javaDirectories="src\test\java;src\testDebug\java;src\test\kotlin;src\testDebug\kotlin"
+        assetsDirectories="src\test\assets;src\testDebug\assets"
+        unitTest="true"/>
+  </testSourceProviders>
+  <testFixturesSourceProviders>
+  </testFixturesSourceProviders>
+  <artifact
+      type="UNIT_TEST">
+  </artifact>
+</variant>

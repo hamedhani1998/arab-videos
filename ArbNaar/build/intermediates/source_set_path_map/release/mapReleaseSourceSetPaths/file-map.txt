@@ -1,0 +1,7 @@
+com.arbnaar.plugin.ArbNaar-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\build\generated\res\pngs\release
+com.arbnaar.plugin.ArbNaar-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\build\generated\res\resValues\release
+com.arbnaar.plugin.ArbNaar-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.arbnaar.plugin.ArbNaar-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.arbnaar.plugin.ArbNaar-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\build\intermediates\merged_res\release\mergeReleaseResources
+com.arbnaar.plugin.ArbNaar-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\src\main\res
+com.arbnaar.plugin.ArbNaar-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArbNaar\src\release\res

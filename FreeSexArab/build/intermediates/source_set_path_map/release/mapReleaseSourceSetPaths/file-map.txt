@@ -1,0 +1,7 @@
+com.freesexarab.plugin.FreeSexArab-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\build\generated\res\pngs\release
+com.freesexarab.plugin.FreeSexArab-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\build\generated\res\resValues\release
+com.freesexarab.plugin.FreeSexArab-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.freesexarab.plugin.FreeSexArab-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.freesexarab.plugin.FreeSexArab-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\build\intermediates\merged_res\release\mergeReleaseResources
+com.freesexarab.plugin.FreeSexArab-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\src\main\res
+com.freesexarab.plugin.FreeSexArab-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FreeSexArab\src\release\res

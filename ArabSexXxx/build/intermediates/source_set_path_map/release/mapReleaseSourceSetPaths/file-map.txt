@@ -1,0 +1,7 @@
+com.arabsexxx.plugin.ArabSexXxx-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\build\generated\res\pngs\release
+com.arabsexxx.plugin.ArabSexXxx-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\build\generated\res\resValues\release
+com.arabsexxx.plugin.ArabSexXxx-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.arabsexxx.plugin.ArabSexXxx-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.arabsexxx.plugin.ArabSexXxx-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\build\intermediates\merged_res\release\mergeReleaseResources
+com.arabsexxx.plugin.ArabSexXxx-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\src\main\res
+com.arabsexxx.plugin.ArabSexXxx-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabSexXxx\src\release\res

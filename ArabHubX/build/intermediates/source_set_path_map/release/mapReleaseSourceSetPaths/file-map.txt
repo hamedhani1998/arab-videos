@@ -1,0 +1,7 @@
+com.arabhubx.plugin.ArabHubX-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\build\generated\res\pngs\release
+com.arabhubx.plugin.ArabHubX-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\build\generated\res\resValues\release
+com.arabhubx.plugin.ArabHubX-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.arabhubx.plugin.ArabHubX-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.arabhubx.plugin.ArabHubX-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\build\intermediates\merged_res\release\mergeReleaseResources
+com.arabhubx.plugin.ArabHubX-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\src\main\res
+com.arabhubx.plugin.ArabHubX-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabHubX\src\release\res

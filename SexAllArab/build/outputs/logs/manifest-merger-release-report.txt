@@ -1,0 +1,16 @@
+-- Merging decision tree log ---
+manifest
+ADDED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml:2:13-83
+INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml:2:13-83
+	package
+		INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml
+	xmlns:android
+		ADDED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml:2:23-81
+uses-sdk
+INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml reason: use-sdk injection requested
+INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml
+INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml
+	android:targetSdkVersion
+		INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml
+	android:minSdkVersion
+		INJECTED from C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexAllArab\build\intermediates\tmp\ProcessLibraryManifest\release\tempAndroidManifest3388338506475840799.xml

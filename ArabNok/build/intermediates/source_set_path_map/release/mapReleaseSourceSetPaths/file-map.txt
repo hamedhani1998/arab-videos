@@ -1,0 +1,7 @@
+com.arabnok.plugin.ArabNok-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\build\generated\res\pngs\release
+com.arabnok.plugin.ArabNok-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\build\generated\res\resValues\release
+com.arabnok.plugin.ArabNok-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.arabnok.plugin.ArabNok-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.arabnok.plugin.ArabNok-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\build\intermediates\merged_res\release\mergeReleaseResources
+com.arabnok.plugin.ArabNok-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\src\main\res
+com.arabnok.plugin.ArabNok-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\ArabNok\src\release\res

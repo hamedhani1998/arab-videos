@@ -1,0 +1,7 @@
+com.xnxx3rab.plugin.XNXX3rab-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\build\generated\res\pngs\release
+com.xnxx3rab.plugin.XNXX3rab-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\build\generated\res\resValues\release
+com.xnxx3rab.plugin.XNXX3rab-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.xnxx3rab.plugin.XNXX3rab-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.xnxx3rab.plugin.XNXX3rab-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\build\intermediates\merged_res\release\mergeReleaseResources
+com.xnxx3rab.plugin.XNXX3rab-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\src\main\res
+com.xnxx3rab.plugin.XNXX3rab-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\XNXX3rab\src\release\res
