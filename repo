@@ -1,0 +1,6 @@
+{
+  "name": "Arab Videos",
+  "description": "مصادر عربية للبالغين - إضافات Cloudstream",
+  "manifestVersion": 1,
+  "pluginLists": ["https://raw.githubusercontent.com/hamedhani1998/arab-videos/refs/heads/main/plugins.json"]
+}
