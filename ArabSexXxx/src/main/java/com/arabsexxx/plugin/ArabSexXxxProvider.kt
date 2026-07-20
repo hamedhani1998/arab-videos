@@ -73,43 +73,27 @@ class ArabSexXxxProvider : MainAPI() {
     ): Boolean {
         try {
             val doc = app.get(data, referer = mainUrl).document
-            val allScript = doc.select("script").joinToString("\n") { it.data() }
+            val html = doc.html()
 
-            // Method 1: flashvars with base64 decode
-            if (allScript.contains("flashvars")) {
-                val entries = listOf("video_url" to "240p", "video_alt_url" to "360p", "video_alt_url2" to "480p")
-                for ((urlKey, quality) in entries) {
-                    val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
-                    if (!url.isNullOrBlank()) {
-                        val decoded = decodeUrl(url)
-                        callback(newExtractorLink(name, name, decoded, ExtractorLinkType.VIDEO) {
-                            this.referer = mainUrl; this.quality = getQualityFromName(quality)
-                        })
-                    }
-                }
-                return true
-            }
-
-            // Method 2: video_url in kt_player
-            val videoUrlMatch = Regex("""video_url\s*:\s*['"]([^'"]+)['"]""").find(allScript)
-            if (videoUrlMatch != null) {
-                val decoded = decodeUrl(videoUrlMatch.groupValues[1])
-                callback(newExtractorLink(name, name, decoded, ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl; this.quality = getQualityFromName("360p")
-                })
-                return true
-            }
-
-            // Method 3: contentUrl in JSON-LD
-            val contentUrl = Regex("""contentUrl["\s:]+["']([^"']+\.mp4[^"']*)["']""").find(allScript)?.groupValues?.get(1)
-            if (contentUrl != null) {
+            // Method 1: contentUrl in JSON-LD schema - MOST RELIABLE
+            val contentUrl = Regex(""""contentUrl"\s*:\s*"([^"]+\.mp4[^"]*)""").find(html)?.groupValues?.get(1)
+            if (!contentUrl.isNullOrBlank()) {
                 callback(newExtractorLink(name, name, contentUrl, ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl; this.quality = getQualityFromName("360p")
+                    this.referer = mainUrl; this.quality = getQualityFromName("720p")
                 })
                 return true
             }
 
-            // Method 4: video source tags
+            // Method 2: video_url in kt_player script
+            val videoUrl = Regex("""video_url\s*:\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
+            if (!videoUrl.isNullOrBlank()) {
+                callback(newExtractorLink(name, name, decodeUrl(videoUrl), ExtractorLinkType.VIDEO) {
+                    this.referer = mainUrl; this.quality = getQualityFromName("720p")
+                })
+                return true
+            }
+
+            // Method 3: video source tags
             doc.select("video source").forEach { source ->
                 val url = source.attr("src")
                 if (url.isNotBlank() && url.contains(".mp4")) {
@@ -120,15 +104,6 @@ class ArabSexXxxProvider : MainAPI() {
                 }
             }
 
-            // Method 5: iframe
-            val iframe = doc.selectFirst("iframe[src]")
-            if (iframe != null) {
-                val iframeUrl = iframe.attr("src")
-                if (iframeUrl.isNotBlank()) {
-                    loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
-                    return true
-                }
-            }
             return false
         } catch (e: Exception) { return false }
     }
