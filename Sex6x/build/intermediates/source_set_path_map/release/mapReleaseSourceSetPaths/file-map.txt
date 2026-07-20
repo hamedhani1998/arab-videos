@@ -1,0 +1,7 @@
+com.sex6x.plugin.Sex6x-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\build\generated\res\pngs\release
+com.sex6x.plugin.Sex6x-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\build\generated\res\resValues\release
+com.sex6x.plugin.Sex6x-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.sex6x.plugin.Sex6x-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.sex6x.plugin.Sex6x-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\build\intermediates\merged_res\release\mergeReleaseResources
+com.sex6x.plugin.Sex6x-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\src\main\res
+com.sex6x.plugin.Sex6x-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Sex6x\src\release\res

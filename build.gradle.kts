@@ -35,7 +35,7 @@ subprojects {
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "hamedhani1998/my-extensions-repo")
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "hamedhani1998/arab-videos")
     }
 
     android {

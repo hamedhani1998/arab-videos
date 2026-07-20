@@ -76,34 +76,63 @@ class Aflamk1Provider : MainAPI() {
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ): Boolean {
-        return try {
+        try {
             val doc = app.get(data, referer = mainUrl).document
             var found = false
-            doc.select("script").forEach { element ->
-                val script = element.html()
-                if (script.contains("flashvars")) {
-                    val v1 = extract(script, "video_url"); val v2 = extract(script, "video_alt_url"); val v3 = extract(script, "video_alt_url2")
-                    val q1 = extract(script, "video_url_text") ?: "360p"; val q2 = extract(script, "video_alt_url_text") ?: "480p"; val q3 = extract(script, "video_alt_url2_text") ?: "720p"
-                    v1?.let { cb(it, q1, mainUrl, callback); found = true }
-                    v2?.let { cb(it, q2, mainUrl, callback); found = true }
-                    v3?.let { cb(it, q3, mainUrl, callback); found = true }
+
+            // Method 1: video source tags - PRIMARY METHOD
+            doc.select("video source").forEach { source ->
+                val url = source.attr("src")
+                val quality = source.attr("title")
+                if (url.isNotBlank() && url.contains(".mp4")) {
+                    callback(newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = url,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = getQualityFromName(quality.ifBlank { "360p" })
+                    })
+                    found = true
                 }
             }
-            found
-        } catch (e: Exception) { false }
-    }
+            if (found) return true
 
-    private fun extract(script: String, key: String): String? {
-        val match = Regex("""$key\s*[:=]\s*['"]([^'"]+)['"]""").find(script) ?: return null
-        return match.groupValues[1].ifBlank { null }
-    }
+            // Method 2: flashvars fallback
+            val allScript = doc.select("script").joinToString("\n") { it.data() }
+            if (allScript.contains("flashvars")) {
+                val entries = listOf(
+                    "video_url" to "video_url_text",
+                    "video_alt_url" to "video_alt_url_text",
+                    "video_alt_url2" to "video_alt_url2_text"
+                )
+                for ((urlKey, textKey) in entries) {
+                    val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
+                    val quality = Regex("""$textKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
+                        ?: when(urlKey) { "video_url" -> "240p"; "video_alt_url" -> "360p"; else -> "480p" }
+                    if (!url.isNullOrBlank()) {
+                        callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
+                            this.referer = mainUrl
+                            this.quality = getQualityFromName(quality)
+                        })
+                        found = true
+                    }
+                }
+            }
+            if (found) return true
 
-    private fun clean(url: String): String = when {
-        url.startsWith("function/0/") -> url.removePrefix("function/0/")
-        url.startsWith("//") -> "https:$url"; else -> url
-    }
+            // Method 3: iframe embed - use loadExtractor
+            val iframe = doc.selectFirst("iframe[src]")
+            if (iframe != null) {
+                val iframeUrl = iframe.attr("src")
+                if (iframeUrl.isNotBlank()) {
+                    loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
+                    return true
+                }
+            }
 
-    private suspend fun cb(url: String, quality: String, referer: String, callback: (ExtractorLink) -> Unit) {
-        callback(newExtractorLink(source = name, name = name, url = clean(url), type = ExtractorLinkType.VIDEO) { this.referer = mainUrl; this.quality = getQualityFromName(quality) })
+            return false
+        } catch (e: Exception) { return false }
     }
 }

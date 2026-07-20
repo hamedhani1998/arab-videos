@@ -1,0 +1,7 @@
+com.fagerneek.plugin.FagerNeek-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\build\generated\res\pngs\release
+com.fagerneek.plugin.FagerNeek-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\build\generated\res\resValues\release
+com.fagerneek.plugin.FagerNeek-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.fagerneek.plugin.FagerNeek-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.fagerneek.plugin.FagerNeek-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\build\intermediates\merged_res\release\mergeReleaseResources
+com.fagerneek.plugin.FagerNeek-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\src\main\res
+com.fagerneek.plugin.FagerNeek-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\FagerNeek\src\release\res

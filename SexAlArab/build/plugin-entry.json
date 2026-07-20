@@ -1,5 +1,5 @@
 {
-    "url": "https://raw.githubusercontent.com/hamedhani1998/my-extensions-repo/builds/SexAlArab.cs3",
+    "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/SexAlArab.cs3",
     "status": 1,
     "version": 1,
     "name": "SexAlArab",
@@ -8,12 +8,12 @@
         "hamedhani1998"
     ],
     "description": "\u0625\u0636\u0627\u0641\u0629 \u0633\u0643\u0633 \u0627\u0644\u0639\u0631\u0628 - \u0623\u0641\u0644\u0627\u0645 \u0625\u0628\u0627\u062d\u064a\u0629 \u0639\u0631\u0628\u064a\u0629 \u0645\u062a\u0631\u062c\u0645\u0629",
-    "fileSize": 16140,
-    "repositoryUrl": "https://github.com/hamedhani1998/my-extensions-repo",
+    "fileSize": 15442,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": [
         "NSFW"
     ],
     "apiVersion": 1,
-    "fileHash": "sha256-03ec1352be4feb5d6da9fab9a7407c75eadd667a1595887a96274612a86ed2f5"
+    "fileHash": "sha256-8c4b940daf80fbc52c74705309497e0519ff650f0c3b921a55622a13bc723516"
 }

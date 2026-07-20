@@ -29,8 +29,12 @@ class SexAlArabProvider : MainAPI() {
                 try {
                     val a = item.selectFirst("a") ?: return@mapNotNull null
                     val href = a.attr("href") ?: return@mapNotNull null
-                    val title = item.selectFirst("strong.title")?.text()?.trim() ?: a.attr("title")
-                    val poster = item.selectFirst("img.thumb")?.let { it.attr("data-original").ifBlank { it.attr("src") } }
+                    val title = item.selectFirst("strong.title")?.text()?.trim()
+                        ?: a.selectFirst("span.title")?.text()?.trim()
+                        ?: a.attr("title")
+                    val poster = item.selectFirst("img.thumb")?.let {
+                        it.attr("data-original").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } }
+                    }
                     val rating = item.selectFirst("div.rating")?.text()?.trim()?.replace("%", "")
                     newMovieSearchResponse(title, href, TvType.NSFW) {
                         this.posterUrl = poster
@@ -49,8 +53,12 @@ class SexAlArabProvider : MainAPI() {
                 try {
                     val a = item.selectFirst("a") ?: return@mapNotNull null
                     val href = a.attr("href") ?: return@mapNotNull null
-                    val title = item.selectFirst("strong.title")?.text()?.trim() ?: a.attr("title")
-                    val poster = item.selectFirst("img.thumb")?.let { it.attr("data-original").ifBlank { it.attr("src") } }
+                    val title = item.selectFirst("strong.title")?.text()?.trim()
+                        ?: a.selectFirst("span.title")?.text()?.trim()
+                        ?: a.attr("title")
+                    val poster = item.selectFirst("img.thumb")?.let {
+                        it.attr("data-original").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } }
+                    }
                     newMovieSearchResponse(title, href, TvType.NSFW) { this.posterUrl = poster }
                 } catch (e: Exception) { null }
             }
@@ -60,13 +68,18 @@ class SexAlArabProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val doc = app.get(url, referer = mainUrl).document
-            val title = doc.selectFirst("h1.htitle")?.text()?.trim()
+            val title = doc.selectFirst("h1")?.text()?.trim()
+                ?: doc.selectFirst(".title, .htitle, .video-title")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?: doc.title().substringBefore(" -").trim()
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             val description = doc.selectFirst("meta[name=description]")?.attr("content")
             val tags = doc.select("meta[name=keywords]")?.attr("content")?.split(",")?.map { it.trim() }?.take(6)
-            newMovieLoadResponse(title, url, TvType.NSFW, url) { this.posterUrl = poster; this.plot = description; this.tags = tags }
+            newMovieLoadResponse(title, url, TvType.NSFW, url) {
+                this.posterUrl = poster
+                this.plot = description
+                this.tags = tags
+            }
         } catch (e: Exception) { null }
     }
 
@@ -74,43 +87,63 @@ class SexAlArabProvider : MainAPI() {
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ): Boolean {
-        return try {
+        try {
             val doc = app.get(data, referer = mainUrl).document
             var found = false
-            
-            // Method 1: HTML5 video sources
-            doc.select("video source").forEach { src ->
-                val url = src.attr("src")
-                val quality = src.attr("title").ifBlank { qlt(url) }
-                if (url.isNotBlank()) { lnk(url, quality, callback); found = true }
-            }
-            if (found) return true
-            
-            // Method 2: flashvars
-            doc.select("script").forEach { element ->
-                val script = element.html()
-                if (script.contains("flashvars")) {
-                    val v1 = rgx(script, "video_url"); val v2 = rgx(script, "video_alt_url"); val v3 = rgx(script, "video_alt_url2")
-                    val q1 = rgx(script, "video_url_text") ?: "360p"; val q2 = rgx(script, "video_alt_url_text") ?: "480p"; val q3 = rgx(script, "video_alt_url2_text") ?: "720p"
-                    v1?.let { lnk(it, q1, callback); found = true }; v2?.let { lnk(it, q2, callback); found = true }; v3?.let { lnk(it, q3, callback); found = true }
+
+            // Method 1: video source tags - PRIMARY METHOD
+            doc.select("video source").forEach { source ->
+                val url = source.attr("src")
+                val quality = source.attr("title")
+                if (url.isNotBlank() && url.contains(".mp4")) {
+                    callback(newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = url,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = getQualityFromName(quality.ifBlank { "360p" })
+                    })
+                    found = true
                 }
             }
             if (found) return true
-            
-            // Method 3: iframe
-            val iframe = doc.selectFirst("div.embed-wrap iframe, iframe[src*=embed]")
-            if (iframe != null) { lnk(iframe.attr("src"), "720p", callback); return true }
-            false
-        } catch (e: Exception) { false }
-    }
 
-    private fun rgx(script: String, key: String): String? {
-        val match = Regex("""$key\s*[:=]\s*['"]([^'"]+)['"]""").find(script) ?: return null
-        return match.groupValues[1].ifBlank { null }
-    }
-    private fun qlt(url: String): String = when { url.contains("720p") -> "720p"; url.contains("480p") -> "480p"; url.contains("360p") -> "360p"; url.contains("1080p") -> "1080p"; else -> "360p" }
-    private fun cln(url: String): String = when { url.startsWith("function/0/") -> url.removePrefix("function/0/"); url.startsWith("//") -> "https:$url"; else -> url }
-    private suspend fun lnk(url: String, quality: String, callback: (ExtractorLink) -> Unit) {
-        callback(newExtractorLink(source = name, name = name, url = cln(url), type = ExtractorLinkType.VIDEO) { this.referer = mainUrl; this.quality = getQualityFromName(quality) })
+            // Method 2: flashvars fallback
+            val allScript = doc.select("script").joinToString("\n") { it.data() }
+            if (allScript.contains("flashvars")) {
+                val entries = listOf(
+                    "video_url" to "video_url_text",
+                    "video_alt_url" to "video_alt_url_text",
+                    "video_alt_url2" to "video_alt_url2_text"
+                )
+                for ((urlKey, textKey) in entries) {
+                    val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
+                    val quality = Regex("""$textKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
+                        ?: when(urlKey) { "video_url" -> "240p"; "video_alt_url" -> "360p"; else -> "480p" }
+                    if (!url.isNullOrBlank()) {
+                        callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
+                            this.referer = mainUrl
+                            this.quality = getQualityFromName(quality)
+                        })
+                        found = true
+                    }
+                }
+            }
+            if (found) return true
+
+            // Method 3: iframe embed - use loadExtractor
+            val iframe = doc.selectFirst("iframe[src]")
+            if (iframe != null) {
+                val iframeUrl = iframe.attr("src")
+                if (iframeUrl.isNotBlank()) {
+                    loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
+                    return true
+                }
+            }
+
+            return false
+        } catch (e: Exception) { return false }
     }
 }

@@ -1,0 +1,7 @@
+com.zebawy.plugin.Zebawy-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\build\generated\res\pngs\release
+com.zebawy.plugin.Zebawy-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\build\generated\res\resValues\release
+com.zebawy.plugin.Zebawy-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.zebawy.plugin.Zebawy-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.zebawy.plugin.Zebawy-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\build\intermediates\merged_res\release\mergeReleaseResources
+com.zebawy.plugin.Zebawy-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\src\main\res
+com.zebawy.plugin.Zebawy-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebawy\src\release\res

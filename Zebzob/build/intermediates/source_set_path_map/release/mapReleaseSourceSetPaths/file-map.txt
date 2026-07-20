@@ -1,0 +1,7 @@
+com.zebzob.plugin.Zebzob-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\build\generated\res\pngs\release
+com.zebzob.plugin.Zebzob-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\build\generated\res\resValues\release
+com.zebzob.plugin.Zebzob-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.zebzob.plugin.Zebzob-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.zebzob.plugin.Zebzob-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\build\intermediates\merged_res\release\mergeReleaseResources
+com.zebzob.plugin.Zebzob-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\src\main\res
+com.zebzob.plugin.Zebzob-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Zebzob\src\release\res

@@ -1,0 +1,7 @@
+com.sexsatee.plugin.SexSatee-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\build\generated\res\pngs\release
+com.sexsatee.plugin.SexSatee-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\build\generated\res\resValues\release
+com.sexsatee.plugin.SexSatee-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
+com.sexsatee.plugin.SexSatee-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
+com.sexsatee.plugin.SexSatee-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\build\intermediates\merged_res\release\mergeReleaseResources
+com.sexsatee.plugin.SexSatee-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\src\main\res
+com.sexsatee.plugin.SexSatee-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\SexSatee\src\release\res
