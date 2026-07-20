@@ -79,64 +79,54 @@ class ArabxCamProvider : MainAPI() {
     ): Boolean {
         try {
             val doc = app.get(data, referer = mainUrl).document
+            val html = doc.html()
 
-            // Method 1: iframe embed - PRIMARY METHOD for this site
+            // Method 1: iframe embed - PRIMARY for this site (playeriz.com)
             val iframe = doc.selectFirst("div.embed-wrap iframe")
             if (iframe != null) {
                 val iframeUrl = iframe.attr("src")
                 if (iframeUrl.isNotBlank()) {
-                    loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
-                    return true
-                }
-            }
+                    // Load the iframe page to extract video URL
+                    val iframeDoc = app.get(iframeUrl, referer = data).document
+                    val iframeHtml = iframeDoc.html()
 
-            // Method 2: flashvars
-            val allScript = doc.select("script").joinToString("\n") { it.data() }
-            if (allScript.contains("flashvars")) {
-                val entries = listOf("video_url" to "360p", "video_alt_url" to "480p", "video_alt_url2" to "720p")
-                for ((urlKey, quality) in entries) {
-                    val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
-                    if (!url.isNullOrBlank()) {
-                        callback(newExtractorLink(name, name, decodeUrl(url), ExtractorLinkType.VIDEO) {
-                            this.referer = mainUrl
-                            this.quality = getQualityFromName(quality)
+                    // Try to find video URL in iframe
+                    val videoUrl = Regex("""(https?://[^"'\s]+\.mp4[^"'\s]*)""").find(iframeHtml)?.groupValues?.get(1)
+                    if (videoUrl != null) {
+                        callback(newExtractorLink(name, name, videoUrl, ExtractorLinkType.VIDEO) {
+                            this.referer = iframeUrl
+                            this.quality = getQualityFromName("720p")
                         })
+                        return true
                     }
-                }
-                return true
-            }
 
-            // Method 3: video source tags
-            doc.select("video source").forEach { source ->
-                val url = source.attr("src")
-                val quality = source.attr("title")
-                if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                        this.referer = mainUrl
-                        this.quality = getQualityFromName(quality.ifBlank { "360p" })
-                    })
+                    // Try m3u8
+                    val m3u8Url = Regex("""(https?://[^"'\s]+\.m3u8[^"'\s]*)""").find(iframeHtml)?.groupValues?.get(1)
+                    if (m3u8Url != null) {
+                        callback(newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
+                            this.referer = iframeUrl
+                            this.quality = getQualityFromName("720p")
+                        })
+                        return true
+                    }
+
+                    // Fallback: use loadExtractor
+                    loadExtractor(iframeUrl, data, subtitleCallback, callback)
                     return true
                 }
+            }
+
+            // Method 2: contentUrl in JSON-LD
+            val contentUrl = Regex(""""contentUrl"\s*:\s*"([^"]+\.mp4[^"]*)""").find(html)?.groupValues?.get(1)
+            if (!contentUrl.isNullOrBlank()) {
+                callback(newExtractorLink(name, name, contentUrl, ExtractorLinkType.VIDEO) {
+                    this.referer = mainUrl
+                    this.quality = getQualityFromName("720p")
+                })
+                return true
             }
 
             return false
         } catch (e: Exception) { return false }
-    }
-
-    private fun decodeUrl(url: String): String {
-        val decoded = when {
-            url.startsWith("function/0/") -> {
-                try {
-                    val base64 = url.removePrefix("function/0/")
-                    android.util.Base64.decode(base64, android.util.Base64.DEFAULT).toString(Charsets.UTF_8)
-                } catch (_: Exception) { url.removePrefix("function/0/") }
-            }
-            else -> url
-        }
-        return when {
-            decoded.startsWith("//") -> "https:$decoded"
-            decoded.startsWith("https/") -> "https://${decoded.removePrefix("https/")}"
-            else -> decoded
-        }
     }
 }
