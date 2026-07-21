@@ -1,4 +1,4 @@
-﻿package com.arbada.plugin
+package com.arbada.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -75,7 +75,7 @@ class ArbadaProvider : MainAPI() {
             val doc = app.get(data, referer = mainUrl).document
             var found = false
             
-            // Method 1: HTML5 video sources
+            // Method 1: HTML5 video sources - PRIORITY
             doc.select("video source").forEach { src ->
                 val url = src.attr("src")
                 val quality = src.attr("title").ifBlank { qlt(url) }
@@ -94,9 +94,15 @@ class ArbadaProvider : MainAPI() {
             }
             if (found) return true
             
-            // Method 3: iframe
+            // Method 3: iframe - pass URL to player
             val iframe = doc.selectFirst("div.embed-wrap iframe, iframe[src*=embed]")
-            if (iframe != null) { lnk(iframe.attr("src"), "720p", callback); return true }
+            if (iframe != null) {
+                val iframeUrl = iframe.attr("src")
+                if (iframeUrl.isNotBlank()) {
+                    callback(newExtractorLink(source = name, name = name, url = iframeUrl, type = ExtractorLinkType.M3U8) { this.referer = data; this.quality = getQualityFromName("720p") })
+                    return true
+                }
+            }
             false
         } catch (e: Exception) { false }
     }

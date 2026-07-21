@@ -1,4 +1,4 @@
-﻿package com.arabx.plugin
+package com.arabx.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -88,12 +88,12 @@ class ArabxCamProvider : MainAPI() {
             }
             if (found) return true
             
-            // Method 2: iframe embed
+            // Method 2: iframe embed - pass URL to player
             val iframe = doc.selectFirst("div.embed-wrap iframe")
             if (iframe != null) {
                 val iframeUrl = iframe.attr("src")
                 if (iframeUrl.isNotBlank()) {
-                    lnk(iframeUrl, "720p", callback)
+                    callback(newExtractorLink(source = name, name = name, url = iframeUrl, type = ExtractorLinkType.M3U8) { this.referer = data; this.quality = getQualityFromName("720p") })
                     return true
                 }
             }
