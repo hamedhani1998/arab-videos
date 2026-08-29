@@ -89,9 +89,8 @@ class Drama4AllProvider : MainAPI() {
 
     private fun SearchItem.toSearchResponse(): SearchResponse? {
         val s = slug ?: return null
-        // هذا المصدر مسئول عن محتوى دراما للجميع فقط (sf_)؛ محتوى narto يعالج في مصدر NartoDrama
-        if (!s.startsWith("sf_")) return null
         val t = title ?: return null
+        // نعرض كل ما تستضيفه دراما للجميع (sf_ و nt_) — لا نستبعد شيئًا حتى تكتمل نتائج البحث
         return newTvSeriesSearchResponse(t, "$mainUrl/series/$s", TvType.TvSeries) {
             posterUrl = cover
             episodes = totalEpisodes.coerceAtLeast(1)
