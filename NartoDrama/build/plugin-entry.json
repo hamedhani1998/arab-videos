@@ -1,7 +1,7 @@
 {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoDrama.cs3",
     "status": 1,
-    "version": 1,
+    "version": 2,
     "name": "NartoDrama",
     "internalName": "NartoDrama",
     "authors": [
@@ -16,5 +16,5 @@
         "Movie"
     ],
     "apiVersion": 1,
-    "fileHash": "sha256-73022cff201e25b0fa59e5a576f95f925e381adf46d3211141317c0210d4e199"
+    "fileHash": "sha256-6898402a0ce709f640f94bd1c199453bc212e94c4b52e24b6c77c711b2bd265b"
 }

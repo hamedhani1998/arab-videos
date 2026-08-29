@@ -55,7 +55,7 @@ class Drama4AllProvider : MainAPI() {
         return newTvSeriesSearchResponse(t, "$mainUrl/series/$s", TvType.TvSeries) {
             posterUrl = cover
             episodes = totalEpisodes.coerceAtLeast(1)
-            score = rating?.let { Score.from10(it) }
+            score = rating?.let { Score.from(it, 10) }
         }
     }
 
