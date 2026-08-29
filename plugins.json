@@ -348,5 +348,61 @@
     "description": "Narto Drama - مسلسلات دراما مترجمة",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/NartoDrama.cs3",
     "name": "Narto Drama"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 12936,
+    "status": 1,
+    "language": "ar",
+    "authors": ["hamedhani1998"],
+    "tvTypes": ["TvSeries", "Movie"],
+    "version": 1,
+    "internalName": "ShortTV",
+    "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/ShortTV.cs3",
+    "name": "ShortTV"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 11608,
+    "status": 1,
+    "language": "ar",
+    "authors": ["hamedhani1998"],
+    "tvTypes": ["TvSeries", "Movie"],
+    "version": 1,
+    "internalName": "StardustTV",
+    "description": "StardustTV - مسلسلات دراما قصيرة عمودية",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/StardustTV.cs3",
+    "name": "StardustTV"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 10443,
+    "status": 1,
+    "language": "ar",
+    "authors": ["hamedhani1998"],
+    "tvTypes": ["TvSeries", "Movie"],
+    "version": 1,
+    "internalName": "FlexTV",
+    "description": "FlexTV - مسلسلات دراما قصيرة عمودية",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/FlexTV.cs3",
+    "name": "FlexTV"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 16454,
+    "status": 1,
+    "language": "ar",
+    "authors": ["hamedhani1998"],
+    "tvTypes": ["TvSeries", "Movie"],
+    "version": 1,
+    "internalName": "NetShort",
+    "description": "NetShort - مسلسلات دراما قصيرة عمودية",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/NetShort.cs3",
+    "name": "NetShort"
   }
 ]
