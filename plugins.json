@@ -320,5 +320,33 @@
     "description": "زبزوب - أفلام إباحية عربية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/Zebzob.cs3",
     "name": "زبزوب"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 19625,
+    "status": 1,
+    "language": "ar",
+    "authors": ["hamedhani1998"],
+    "tvTypes": ["TvSeries", "Movie"],
+    "version": 1,
+    "internalName": "Drama4All",
+    "description": "دراما للجميع - مسلسلات وأفلام مترجمة",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/Drama4All.cs3",
+    "name": "دراما للجميع"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 18915,
+    "status": 1,
+    "language": "ar",
+    "authors": ["hamedhani1998"],
+    "tvTypes": ["TvSeries", "Movie"],
+    "version": 1,
+    "internalName": "NartoDrama",
+    "description": "Narto Drama - مسلسلات دراما مترجمة",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/NartoDrama.cs3",
+    "name": "Narto Drama"
   }
 ]
