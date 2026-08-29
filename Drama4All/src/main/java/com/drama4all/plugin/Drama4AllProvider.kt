@@ -10,7 +10,7 @@ import com.lagradost.cloudstream3.utils.*
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
-// /api/local_search item
+// LIBRARY item embedded on drama4all list + search pages.
 private data class SearchItem(
     val cover: String? = null,
     val description: String? = null,
@@ -47,6 +47,46 @@ class Drama4AllProvider : MainAPI() {
         "list/all" to "المكتبة",
     )
 
+    // Robustly extract the `const LIBRARY = [...]` JSON array token from an HTML page.
+    // Uses a real bracket matcher (JSON-aware) instead of the naive indexOf('[')/lastIndexOf(']'),
+    // which grabs too much when other arrays/JS follow the LIBRARY array (e.g. on /search pages).
+    private fun extractLibraryArray(html: String): String? {
+        val mark = html.indexOf("const LIBRARY")
+        if (mark < 0) return null
+        val start = html.indexOf('[', mark)
+        if (start < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (k in start until html.length) {
+            val c = html[k]
+            if (!inStr) {
+                when (c) {
+                    '"' -> inStr = true
+                    '[' -> depth++
+                    ']' -> { depth--; if (depth == 0) return html.substring(start, k + 1) }
+                }
+            } else {
+                if (esc) esc = false
+                else if (c == '\\') esc = true
+                else if (c == '"') inStr = false
+            }
+        }
+        return null
+    }
+
+    private fun parseLibrary(html: String): List<SearchItem> {
+        val arr = extractLibraryArray(html) ?: return emptyList()
+        return try {
+            mapper.readValue(
+                arr,
+                object : com.fasterxml.jackson.core.type.TypeReference<List<SearchItem>>() {}
+            )
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     private fun SearchItem.toSearchResponse(): SearchResponse? {
         val s = slug ?: return null
         // هذا المصدر مسئول عن محتوى دراما للجميع فقط (sf_)؛ محتوى narto يعالج في مصدر NartoDrama
@@ -59,26 +99,17 @@ class Drama4AllProvider : MainAPI() {
         }
     }
 
+    private fun List<SearchItem>.mapResults(): List<SearchResponse> =
+        mapNotNull { it.toSearchResponse() }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val url = "$mainUrl/${request.data}"
             val doc = app.get(url, referer = mainUrl).document
-            val items = doc.select("script").filter { el -> el.html().contains("const LIBRARY") }
-                .flatMap { el ->
-                    val html = el.html()
-                    val start = html.indexOf('[')
-                    val end = html.lastIndexOf(']')
-                    if (start < 0 || end <= start) return@flatMap emptyList()
-                    try {
-                        val list = mapper.readValue(
-                            html.substring(start, end + 1),
-                            object : com.fasterxml.jackson.core.type.TypeReference<List<SearchItem>>() {}
-                        )
-                        list.mapNotNull { it.toSearchResponse() }
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
+            val items = doc.select("script")
+                .mapNotNull { el -> el.html().takeIf { it.contains("const LIBRARY") } }
+                .flatMap { parseLibrary(it) }
+                .mapResults()
             if (items.isEmpty()) null else newHomePageResponse(request.name, items)
         } catch (e: Exception) {
             null
@@ -87,16 +118,14 @@ class Drama4AllProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val res = app.get("$mainUrl/api/local_search?q=${java.net.URLEncoder.encode(query, "UTF-8")}", referer = mainUrl).text
-            val items: List<SearchItem> = try {
-                mapper.readValue(
-                    res,
-                    object : com.fasterxml.jackson.core.type.TypeReference<List<SearchItem>>() {}
-                )
-            } catch (e: Exception) {
-                return null
-            }
-            items.mapNotNull { it.toSearchResponse() }
+            // /api/local_search is capped (≈20, and returns narto nt_ too), so it misses most
+            // drama4all sf_ works. The site's own /search?q= page embeds the FULL result set in
+            // its `const LIBRARY` array — parse that instead.
+            val q = java.net.URLEncoder.encode(query, "UTF-8")
+            val res = app.get("$mainUrl/search?q=$q", referer = mainUrl).text
+            val items = parseLibrary(res)
+            if (items.isEmpty()) return emptyList()
+            items.mapResults()
         } catch (e: Exception) {
             null
         }
@@ -174,7 +203,6 @@ class Drama4AllProvider : MainAPI() {
 
             if (streamText.contains("#EXT-X-STREAM-INF")) {
                 // master playlist => رابط واحد كامل يحتوي كل الجودات المتاحة + الصوت.
-                // المشغل (ExoPlayer) يختار الجودة المتاحة تلقائياً ويدمج الصوت من مجموعة #EXT-X-MEDIA.
                 callback(
                     newExtractorLink(
                         source = name,

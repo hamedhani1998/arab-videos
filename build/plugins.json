@@ -173,14 +173,14 @@
     {
         "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/Drama4All.cs3",
         "status": 1,
-        "version": 4,
+        "version": 5,
         "name": "Drama4All",
         "internalName": "Drama4All",
         "authors": [
             "hamedhani1998"
         ],
         "description": "\u062f\u0631\u0627\u0645\u0627 \u0644\u0644\u062c\u0645\u064a\u0639 - \u0645\u0633\u0644\u0633\u0644\u0627\u062a \u0648\u0623\u0641\u0644\u0627\u0645 \u0645\u062a\u0631\u062c\u0645\u0629",
-        "fileSize": 21480,
+        "fileSize": 21382,
         "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
         "language": "ar",
         "tvTypes": [
@@ -188,7 +188,7 @@
             "Movie"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-53e3c98583999f4208018fd887e99f5f80ff07bcbc8ec9c703dcc5ab426fed3b"
+        "fileHash": "sha256-39e6fc7a30beecbd1f1362be6eda87d77186b26354df7731e37d8361cacb6661"
     },
     {
         "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/extractors.cs3",
