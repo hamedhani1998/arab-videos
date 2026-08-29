@@ -155,6 +155,7 @@ class NartoDramaProvider : MainAPI() {
             }
             val vUrl = item.videoUrl ?: return false
 
+            // 1) كل الترجمات/القرائن
             item.subs?.forEach { s ->
                 val lang = s.lang ?: return@forEach
                 val subUrl = s.url ?: return@forEach
@@ -165,18 +166,101 @@ class NartoDramaProvider : MainAPI() {
                 }
             }
 
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "Narto HLS",
-                    url = vUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    referer = mainUrl
-                    quality = getQualityFromName("1080p")
-                    headers = mapOf("Referer" to mainUrl)
+            // 2) تحليل الـ m3u8: هل هو master (جودات + أصوات متعددة) أم ملف جودة واحدة؟
+            val streamText = try { app.get(vUrl, referer = mainUrl).text } catch (e: Exception) { "" }
+
+            if (streamText.contains("#EXT-X-STREAM-INF")) {
+                // master playlist => نكشف كل الجودات وكل الأصوات
+                val base = vUrl.substringBeforeLast('/')
+
+                // روابط مقاطع الفيديو الخاصة بكل جودة (#EXT-X-STREAM-INF -> URI بالسطر التالي)
+                val renditions = mutableListOf<Pair<Int, String>>()
+                Regex("""#EXT-X-STREAM-INF:([^\n]*)\n\s*([^\s\n#]+)""").findAll(streamText).forEach { mm ->
+                    val attrs = mm.groupValues[1]
+                    val uri = mm.groupValues[2]
+                    val h = Regex("""RESOLUTION=\d+x(\d+)""").find(attrs)?.groupValues?.get(1)?.toIntOrNull()
+                    if (h != null && uri.isNotBlank()) {
+                        renditions.add(h to (if (uri.startsWith("http")) uri else "$base/$uri"))
+                    }
                 }
-            )
+
+                // أطواق الصوت (الدبلجة) من #EXT-X-MEDIA
+                val audioUrls = Regex("""(?m)#EXT-X-MEDIA:TYPE=AUDIO[^\n]*?URI="([^"]+)"[^\n]*""")
+                    .findAll(streamText)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.takeIf(String::isNotBlank) }
+                    .map { u -> if (u.startsWith("http")) u else "$base/$u" }
+                    .distinct().toList()
+                val audioTracks = audioUrls.mapNotNull { u ->
+                    try { newAudioFile(u) { headers = mapOf("Referer" to mainUrl) } } catch (e: Exception) { null }
+                }
+
+                if (renditions.isNotEmpty()) {
+                    // رابط واحد لكل جودة حتى تظهر جميع الجودات
+                    renditions.sortedByDescending { it.first }.forEach { (h, rendUrl) ->
+                        val qName = "${h}p"
+                        callback(
+                            newExtractorLink(
+                                source = name,
+                                name = "$qName (صوت)",
+                                url = rendUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                referer = mainUrl
+                                quality = getQualityFromName(qName)
+                                headers = mapOf("Referer" to mainUrl)
+                                this.audioTracks = audioTracks
+                            }
+                        )
+                    }
+                    // رابط master كامل: كل الجودات + كل الأصوات (ضمانة للصوت)
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "Full HD (كل الجودات والأصوات)",
+                            url = vUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            referer = mainUrl
+                            quality = getQualityFromName("1080p")
+                            headers = mapOf("Referer" to mainUrl)
+                            this.audioTracks = audioTracks
+                        }
+                    )
+                } else {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "HLS",
+                            url = vUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            referer = mainUrl
+                            headers = mapOf("Referer" to mainUrl)
+                            this.audioTracks = audioTracks
+                        }
+                    )
+                }
+            } else {
+                // ملف media وحيد (جودة واحدة): نكشف عنه مباشرة
+                val q = when {
+                    vUrl.contains("1080p") -> "1080p"
+                    vUrl.contains("720p") -> "720p"
+                    vUrl.contains("480p") -> "480p"
+                    else -> "480p"
+                }
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = q,
+                        url = vUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        referer = mainUrl
+                        quality = getQualityFromName(q)
+                        headers = mapOf("Referer" to mainUrl)
+                    }
+                )
+            }
             true
         } catch (e: Exception) {
             false
