@@ -10,17 +10,22 @@ import com.lagradost.cloudstream3.utils.*
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
-// ---- Sharing drama4all.com (open backend) for INDEX/SEARCH/DETAILS ----
-// Same /api/local_search item shape as Drama4All provider.
-private data class SearchItem(
-    val cover: String? = null,
-    val description: String? = null,
-    @JsonProperty("total_episodes") val totalEpisodes: Int = 0,
-    val slug: String? = null,               // nt_ prefixed on drama4all
-    val title: String? = null,
+// ---- edge.narto-drama.com is the OPEN (no-Cloudflare) mirror of narto-drama.com ----
+// It serves the native Arabic catalog (including ALL dubbed مدبلج content) at
+//   GET /search?lang=ar-SA&q=<query>   -> HTML page embedding a ListItem JSON array
+//   GET /detail/watch/{slug}           -> series detail (h1, poster, episode list)
+//   GET /e/rs/detail/watch/{slug}/{ep}/refresh-source?rs_ctx={JWT} -> playback
+// The web frontend narto-drama.com itself is Cloudflare-protected; edge is not.
+
+// One JSON-LD ListItem entry from the search results page.
+private data class SearchHit(
+    @JsonProperty("@type") val type: String? = null,
+    val url: String? = null,    // https://edge.narto-drama.com/detail/watch/{slug}?lang=...
+    val name: String? = null,   // Arabic title (e.g. "[مدبلج] ...")
+    val image: String? = null,  // /assets/poster/{id}.jpg
 )
 
-// ---- narto-drama edge API (no Cloudflare) for PLAYBACK ----
+// ---- narto edge playback API ----
 private data class EdgeResponse(
     val ok: Boolean? = null,
     val message: String? = null,
@@ -38,61 +43,64 @@ private data class EdgeSub(
 
 // Minimal fake JWT the edge accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
-private const val EDGE_HOST = "https://edge.narto-drama.com"
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
 class NartoDramaProvider : MainAPI() {
     override var name = "Narto Drama"
-    override var mainUrl = "https://drama4all.com"   // open indexing backend (shares narto nt_ content)
+    override var mainUrl = "https://edge.narto-drama.com"  // open backend (no Cloudflare)
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
+    // Curated seed queries mirroring the native Narto home: a generic feed, the all-dubbed
+    // مدبلج feed, and a general drama feed. The empty query returns the default browse list.
     override val mainPage = mainPageOf(
-        "list/trending" to "الأكثر مشاهدة",
-        "list/recent" to "أضيف حديثاً",
-        "list/all" to "المكتبة",
+        "ق" to "الأحدث والمقترحة",
+        "مدبلج" to "مسلسلات مدبلجة 🎙️",
+        "دراما" to "دراما",
     )
 
     // The video-serve origin we must present to the edge/stream endpoints.
     private val nartoOrigin = "https://narto-drama.com"
 
-    private fun SearchItem.toSearchResponse(): SearchResponse? {
-        val s = slug ?: return null
-        // Only narto-drama (nt_) content belongs to this source.
-        if (!s.startsWith("nt_")) return null
-        val t = title ?: return null
-        return newTvSeriesSearchResponse(t, "$mainUrl/series/$s", TvType.TvSeries) {
-            posterUrl = cover
-            episodes = totalEpisodes.coerceAtLeast(1)
+    // ---- Parse the ListItem JSON array embedded in a /search HTML page ----
+    private fun parseSearchItems(html: String): List<SearchHit> {
+        return try {
+            val marker = "\"@type\":\"ListItem\""
+            val start = html.indexOf(marker)
+            if (start < 0) return emptyList()
+            // Walk back to the opening '[' of the array that holds the list items.
+            var arrStart = start
+            while (arrStart > 0 && html[arrStart] != '[') arrStart--
+            if (html[arrStart] != '[') return emptyList()
+            // Walk forward to the matching ']'.
+            var depth = 0
+            var arrEnd = -1
+            for (k in arrStart until html.length) {
+                when (html[k]) {
+                    '[' -> depth++
+                    ']' -> { depth--; if (depth == 0) { arrEnd = k; break } }
+                }
+            }
+            if (arrEnd < 0) return emptyList()
+            mapper.readValue(
+                html.substring(arrStart, arrEnd + 1),
+                object : com.fasterxml.jackson.core.type.TypeReference<List<SearchHit>>() {}
+            ).filter { !it.url.isNullOrBlank() && !it.name.isNullOrBlank() }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 
-    // Every narto playback starts from a drama4all /series/nt_<slug> (or /watch/nt_<slug>/<ep>)
-    // url. We strip the nt_ prefix because the narto edge expects the canonical slug.
-    private fun canonicalSlug(slug: String): String = slug.removePrefix("nt_")
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val url = "$mainUrl/${request.data}"
-            val doc = app.get(url, referer = mainUrl).document
-            val items = doc.select("script").filter { el -> el.html().contains("const LIBRARY") }
-                .flatMap { el ->
-                    val html = el.html()
-                    val start = html.indexOf('[')
-                    val end = html.lastIndexOf(']')
-                    if (start < 0 || end <= start) return@flatMap emptyList()
-                    try {
-                        val list = mapper.readValue(
-                            html.substring(start, end + 1),
-                            object : com.fasterxml.jackson.core.type.TypeReference<List<SearchItem>>() {}
-                        )
-                        list.mapNotNull { it.toSearchResponse() }
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
-            if (items.isEmpty()) null else newHomePageResponse(request.name, items)
+            val q = request.data.replace(" ", "+")
+            val url = "$mainUrl/search?lang=ar-SA&q=$q"
+            val doc = app.get(url, referer = nartoOrigin).text
+            val items = parseSearchItems(doc)
+            if (items.isEmpty()) return null
+            val list = items.mapNotNull { it.toSearchResponse() }
+            if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {
             null
         }
@@ -100,50 +108,51 @@ class NartoDramaProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val res = app.get("$mainUrl/api/local_search?q=${java.net.URLEncoder.encode(query, "UTF-8")}", referer = mainUrl).text
-            val items: List<SearchItem> = try {
-                mapper.readValue(
-                    res,
-                    object : com.fasterxml.jackson.core.type.TypeReference<List<SearchItem>>() {}
-                )
-            } catch (e: Exception) {
-                return null
-            }
+            val q = java.net.URLEncoder.encode(query, "UTF-8")
+            val res = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            val items = parseSearchItems(res)
             items.mapNotNull { it.toSearchResponse() }
         } catch (e: Exception) {
             null
         }
     }
 
+    private fun SearchHit.toSearchResponse(): SearchResponse? {
+        val u = url ?: return null
+        val slug = Regex("""/detail/watch/([^/?]+)""").find(u)?.groupValues?.get(1) ?: return null
+        val name = this.name ?: return null
+        // Keep the "[مدبلج] ..." prefix so dubbed entries are obviously marked.
+        val poster = image?.let { if (it.startsWith("http")) it else mainUrl + it }
+        return newTvSeriesSearchResponse(name, "$mainUrl/detail/watch/$slug", TvType.TvSeries) {
+            this.posterUrl = poster
+        }
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val doc = app.get(url, referer = mainUrl).document
+            val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
+            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
+
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?: return null
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            val description = doc.selectFirst("p.synopsis")?.text()?.trim()
-                ?: doc.selectFirst("meta[name=description]")?.attr("content")
-            val tags = doc.select("div.stage-tags a.tag").mapNotNull { it.text()?.trim()?.takeIf(String::isNotEmpty) }
+            val description = doc.selectFirst("meta[name=description]")?.attr("content")
 
-            val slug = doc.select("script").mapNotNull { el ->
-                val html = el.html()
-                val m = Regex("""const SERIES\s*=\s*\{[^}]*slug:\s*"([^"]+)"""", RegexOption.DOT_MATCHES_ALL).find(html)
-                m?.groupValues?.get(1)
-            }.firstOrNull()
-
-            val eps = doc.select("div.eps a[data-ep]").mapNotNull { el ->
-                val ep = el.text()?.trim()?.toIntOrNull() ?: return@mapNotNull null
-                newEpisode("/watch/$slug/$ep") {
-                    episode = ep
-                    name = "الحلقة $ep"
+            val eps = doc.select("div.episode-list a.episode-item")
+                .mapNotNull { el ->
+                    val href = el.attr("href") ?: return@mapNotNull null
+                    val ep = Regex("""/detail/watch/[^/]+/(\d+)""").find(href)?.groupValues?.get(1)
+                        ?.toIntOrNull() ?: return@mapNotNull null
+                    newEpisode("$mainUrl/detail/watch/$slug/$ep") {
+                        episode = ep
+                        name = "الحلقة $ep"
+                    }
                 }
-            }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 posterUrl = poster
                 plot = description
-                this.tags = tags
             }
         } catch (e: Exception) {
             null
@@ -153,7 +162,7 @@ class NartoDramaProvider : MainAPI() {
     // Fetch the narto edge refresh-source payload for a canonical slug+episode.
     private suspend fun edgeRefreshSource(slug: String, ep: String): EdgeResponse? {
         return try {
-            val edgeUrl = "$EDGE_HOST/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx"
+            val edgeUrl = "$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx"
             val res = app.get(edgeUrl, referer = nartoOrigin).text
             mapper.readValue(res, EdgeResponse::class.java)
         } catch (e: Exception) {
@@ -168,19 +177,20 @@ class NartoDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            // data = /watch/nt_<slug>/<ep>
-            val m = Regex("""/watch/([\w\-]+)/(\d+)""").find(data) ?: return false
+            // data = $mainUrl/detail/watch/{slug}/{ep}
+            val m = Regex("""/detail/watch/([^/?]+)/(\d+)""").find(data) ?: return false
             val ep = m.groupValues[2]
+            var slug = m.groupValues[1]
 
-            // Try with the drama4all slug (nt_ stripped). If the narto edge reports a
-            // slug_mismatch it returns the canonical slug in `canonical` — retry with it.
-            var slug = canonicalSlug(m.groupValues[1])
             var edge = edgeRefreshSource(slug, ep) ?: return false
 
-            // Canonical re-discovery: drama4all slugs (e.g. -bl-r-by-at) may differ from the
-            // narto canonical (e.g. -bl-rby-at). The edge tells us the right one.
+            // If the source reports a stream error that is temporarily unavailable, surface a
+            // readable failure rather than silently returning nothing.
+            if (edge.ok != true && edge.message == "stream_temporarily_unavailable") return false
+
+            // Canonical re-discovery: a requested slug may differ from the narto canonical one.
             if (edge.ok != true && edge.message == "slug_mismatch") {
-                val canon = edge.canonical?.let { Regex("""/watch/([^/]+)/""").find(it)?.groupValues?.get(1) }
+                val canon = edge.canonical?.let { Regex("""/detail/watch/([^/?]+)/""").find(it)?.groupValues?.get(1) }
                 if (canon != null && canon != slug) {
                     slug = canon
                     edge = edgeRefreshSource(slug, ep) ?: return false
