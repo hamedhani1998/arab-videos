@@ -2,7 +2,7 @@ android {
     namespace = "com.drama4all.plugin"
 }
 
-version = 5
+version = 1
 
 cloudstream {
     description = "دراما للجميع - مسلسلات وأفلام مترجمة"
