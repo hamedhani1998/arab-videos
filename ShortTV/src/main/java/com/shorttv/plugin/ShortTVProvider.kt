@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import java.net.URL
+import java.util.Base64
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -59,12 +61,6 @@ class ShortTVProvider : MainAPI() {
             if (seg.length >= 3 && seg.all(Char::isDigit)) return seg
         }
         return null
-    }
-
-    private fun extractNuxtData(html: String): JsonNode? {
-        val regex = Regex("""<script type="application/json"[^>]*id="__NUXT_DATA__"[^>]*>([\s\S]*?)</script>""")
-        val m = regex.find(html) ?: return null
-        return try { mapper.readTree(m.groupValues[1]) } catch (e: Exception) { null }
     }
 
     // حلّ مرجع __NUXT_DATA__: مرجع رقمي يقفز إلى entry آخر، أو القيمة المباشرة
@@ -139,35 +135,6 @@ class ShortTVProvider : MainAPI() {
         return null
     }
 
-    private fun parseShowList(html: String): List<SearchResponse> {
-        val results = mutableListOf<SearchResponse>()
-        val seen = mutableSetOf<String>()
-        val posters = posterRegex.findAll(html).map { it.groupValues[1] }.toList()
-        var posterIdx = 0
-        val titles = cardTitleRegex.findAll(html).map { it.groupValues[1].trim() }.toList()
-        var titleIdx = 0
-
-        for (m in dramaLinkRegex.findAll(html)) {
-            val path = m.groupValues[1]
-            val showId = showIdFromPath(path) ?: continue
-            if (seen.add(showId)) {
-                val poster = posters.getOrNull(posterIdx++)
-                val cardTitle = titles.getOrNull(titleIdx++)?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-                val cleanTitle = cardTitle?.takeIf { it.isNotBlank() } ?: cleanName(path)
-                results.add(
-                    newTvSeriesSearchResponse(
-                        cleanTitle,
-                        "$mainUrl/ar/drama/$path",
-                        TvType.TvSeries
-                    ) {
-                        this.posterUrl = poster
-                    }
-                )
-            }
-        }
-        return results
-    }
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val res = app.get("$mainUrl/${request.data}", referer = mainUrl).text
@@ -209,7 +176,6 @@ class ShortTVProvider : MainAPI() {
             val nuxtTitle = show?.title?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) }
             val ogTitle = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
                 .find(res)?.groupValues?.get(1)?.trim()
-                ?.replace(Regex("""\s*-\s*ShortMax\s*$"""), "")?.trim()
             val h1 = Regex("""<h1[^>]*>([^<]+)</h1>""").find(res)?.groupValues?.get(1)?.trim()
             val title = nuxtTitle ?: ogTitle ?: h1 ?: "ShortTV #$showId"
             val plot = show?.description

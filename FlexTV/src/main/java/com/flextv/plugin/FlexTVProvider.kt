@@ -47,27 +47,42 @@ class FlexTVProvider : MainAPI() {
     private fun parseShowList(html: String): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
-        // ابحث عن poster لكلّ عمل (يأتي قبل أول حلقة له عادة)
-        val posterRegex = Regex("""data-src="(https://file-cdn\.flextv\.cc/image/[^"]+)"""")
-        val allPosters = posterRegex.findAll(html).map { it.groupValues[1] }.toList()
-        var posterIdx = 0
-        for (m in episodePathRegex.findAll(html)) {
-            val path = m.groupValues[1]
-            val parsed = parsePath(path) ?: continue
-            val (rawTitle, seriesId) = parsed
+
+        // استخراج العناوين والروابط والصور من نمط FlexTV الفعلي
+        // الروابط في HTML تبدو كـ: /ar/episodes/episode-{N}-{title-with-dashes}-{seriesId}
+        // حيث العنوان قد يحتوي على "-" كجزء من الاسم العربي المشفر
+        val linkRegex = Regex("""href="(/ar/episodes/episode-[^"]+)""")
+        val titleAttrRegex = Regex("""title="([^"]+)"""")
+        val imgRegex = Regex("""<img[^>]+data-src="([^"]+)"""")
+
+        // استخراج جميع الروابط والعناوين والصور
+        val links = linkRegex.findAll(html).map { it.groupValues[1] }.toList()
+        val titles = titleAttrRegex.findAll(html).map { it.groupValues[1].trim() }.toList()
+        val imgs = imgRegex.findAll(html).map { it.groupValues[1] }.toList()
+
+        var imgIdx = 0
+        var titleIdx = 0
+
+        for (link in links) {
+            // استخراج المسار بدون معاملات URL أو تجزئة
+            val cleanLink = link.substringBefore("?").substringBefore("#")
+            // استخراج seriesId من آخر جزء
+            val segments = cleanLink.split("-")
+            if (segments.size < 3) continue
+
+            // الحصول على معرّف المسلسل (آخر جزء رقمي)
+            val seriesId = segments.last().takeIf { it.all { c -> c.isLetterOrDigit() } } ?: continue
+            if (seriesId.length < 3) continue
+
             if (seen.add(seriesId)) {
-                val poster = allPosters.getOrNull(posterIdx)
-                posterIdx++
-                // استخدم المسار الكامل من الصفحة (يحوي العنوان) كي لا يخطئ load()
-                val cardUrl = if (rawTitle.isBlank()) {
-                    "$mainUrl/ar/episodes/episode-1-$seriesId"
-                } else {
-                    "$mainUrl/ar/episodes/$path"
-                }
-                val title = rawTitle.ifBlank { "FlexTV" }
+                val poster = imgs.getOrNull(imgIdx++)
+                val cardTitle = titles.getOrNull(titleIdx++)?.takeIf { it.isNotBlank() }
+                    ?: decodeEpisodeTitle(segments)
+
+                val cardUrl = "$mainUrl$link"
                 results.add(
                     newTvSeriesSearchResponse(
-                        title,
+                        cardTitle ?: "FlexTV",
                         cardUrl,
                         TvType.TvSeries
                     ) {
@@ -76,7 +91,53 @@ class FlexTVProvider : MainAPI() {
                 )
             }
         }
+
+        // احتياطي: إذا لم نتمكن من استخراج أي نتائق، استخدم العنوان من og:title
+        if (results.isEmpty()) {
+            val ogTitles = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""").findAll(html)
+                .map { it.groupValues[1].trim() }.toList()
+            val ogImages = Regex("""<meta\s+property="og:image"\s+content="([^"]+)"""").findAll(html)
+                .map { it.groupValues[1] }.toList()
+
+            if (ogTitles.isNotEmpty()) {
+                val title = ogTitles.first()
+                // استخراج seriesId من og:url أو من العنوان
+                val ogUrlMatch = Regex("""<meta\s+property="og:url"\s+content="([^"]+)"""").find(html)
+                val seriesId = ogUrlMatch?.groupValues?.get(1)?.let { url ->
+                    url.substringAfterLast("/").substringBefore("?").substringBefore("#")
+                        .split("-").lastOrNull()?.takeIf { it.all { c -> c.isLetterOrDigit() } }
+                } ?: "1"
+
+                if (seen.add(seriesId.toString())) {
+                    results.add(newTvSeriesSearchResponse(
+                        title,
+                        "$mainUrl/ar/episodes/episode-1-$seriesId",
+                        TvType.TvSeries
+                    ) {
+                        this.posterUrl = ogImages.getOrNull(0)
+                    })
+                }
+            }
+        }
+
         return results
+    }
+
+    private fun decodeEpisodeTitle(segments: List<String>): String? {
+        // الصيغة: episode-{N}-{title-with-dashes}-{seriesId}
+        // العنوان هو كل شيء بين {N} والـ {seriesId} الأخير
+        if (segments.size < 4) return null
+        // ننضح الترميز ونحوّله لعنوان
+        val enc = segments.drop(2).dropLast(1).joinToString("-")
+        if (enc.isBlank()) return null
+        return try {
+            java.net.URLDecoder.decode(enc.replace("+", "%2B"), "UTF-8")
+                .replace("-", " ")
+                .replace(Regex("""\s+"""), " ")
+                .trim()
+        } catch (e: Exception) {
+            enc.replace("-", " ").trim()
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {

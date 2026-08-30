@@ -49,8 +49,6 @@ private fun encryptRequestAes(json: String): String {
 }
 
 private fun decryptResponseAes(b64Cipher: String, respAesKeyBase64: String): String {
-    // respAesKeyBase64 is the RSA-decrypted response: it's the server's per-request AES key,
-    // delivered as a base64 string. Decode once to get the 32 raw bytes.
     val rawKey = Base64.getDecoder().decode(respAesKeyBase64)
     val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
     cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, "AES"))
@@ -147,16 +145,16 @@ class NetShortProvider : MainAPI() {
     private val cardRegex = Regex("""<a\s+href="(/ar/episode/[^"]+)""")
     // احتياطي: استخرج روابط الحلقات من HTML مباشرة
     private val htmlEpLinkRegex = Regex("""href="(/ar/episode/[^"?#]+)""")
-    private val htmlEpTitleRegex = Regex("""title="([^"]+)"""")
+    private val htmlEpTitleRegex = Regex("""title="([^"]+)""")
     // نستخرج البيانات من حمولة RSC (self.__next_f.push) — الاقتباسات مهرّبة (\")
     // نطابق حتى علامة الاقتباس المهرّبة التالية (\")، مع السماح بأي محارف بينها
-    private val nextDataNameUrl = Regex("""\\"shortPlayNameUrl\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
-    private val nextDataFullUrl = Regex("""\\"fullEpisodeNameUrl\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
-    private val nextDataName = Regex("""\\"shortPlayName\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
-    private val nextDataCover = Regex("""\\"shortPlayCover\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
-    private val nextDataEpisodes = Regex("""\\"totalEpisode\\"\s*:\s*(\d+)""")
-    private val titleInCardRegex = Regex("""title="([^"]+)"""")
-    private val posterInCardRegex = Regex("""class="poster[^"]*"\s+src="([^"]+)"""")
+    private val nextDataNameUrl = Regex("""\\"shortPlayNameUrl\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\""")
+    private val nextDataFullUrl = Regex("""\\"fullEpisodeNameUrl\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\""")
+    private val nextDataName = Regex("""\\"shortPlayName\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\""")
+    private val nextDataCover = Regex("""\\"shortPlayCover\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\""")
+    private val nextDataEpisodes = Regex("""\\"totalEpisode\\"\s*:\s*(\\d+)""")
+    private val titleInCardRegex = Regex("""title="([^"]+)""")
+    private val posterInCardRegex = Regex("""class="poster[^\"]*"\s+src="([^"]+)"""")
 
     private fun decodeTitle(encoded: String): String =
         try { java.net.URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8") }
@@ -165,62 +163,26 @@ class NetShortProvider : MainAPI() {
     private fun titleFromPath(path: String): String {
         val segments = path.split("-")
         return segments.dropLast(2).joinToString("-")
-            .replace(Regex("""^\d+-"""), "")
+            .replace(Regex("""^\\d+-"""), "")
             .trim()
     }
 
     // يستخرج قائمة المسلسلات من دفعات self.__next_f.push
+    // التحسين الرئيسي: أولوية RSC على HTML لضمان أسماء نظيفة
     private fun parseShowList(html: String): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
-        // أولاً: ابحث في HTML الحيّ (لو كان فيه <a href>...)
-        for (m in cardRegex.findAll(html)) {
-            val raw = m.groupValues[1]
-            val decoded = decodeTitle(raw)
-            val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
-            val parts = path.split("-")
-            if (parts.size < 3) continue
-            val showId = parts.last()
-            if (!showId.all { it.isDigit() }) continue
-            val title = parts.dropLast(2).joinToString("-").replace(Regex("""^\d+-"""), "").trim()
-            if (title.isBlank()) continue
-            val url = "$mainUrl$raw"
-            if (seen.add(url)) {
-                val block = html.substring(m.range.first, m.range.last + 1)
-                val poster = posterInCardRegex.find(block)?.groupValues?.get(1)
-                results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
-                    this.posterUrl = poster
-                })
-            }
-        }
-        // ثانياً: احتياطي — ابحث في HTML الحيّ عن روابط /ar/episode/...
-        if (results.isEmpty()) {
-            val htmlLinks = htmlEpLinkRegex.findAll(html).map { it.groupValues[1] }.toList()
-            val htmlTitles = htmlEpTitleRegex.findAll(html).map { it.groupValues[1] }.toList()
-            var tIdx = 0
-            for (raw in htmlLinks) {
-                val decoded = decodeTitle(raw)
-                val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
-                val parts = path.split("-")
-                if (parts.size < 2) continue
-                val showId = parts.last()
-                if (!showId.all { it.isDigit() }) continue
-                val url = "$mainUrl$raw"
-                if (seen.add(url)) {
-                    val title = htmlTitles.getOrNull(tIdx++)?.takeIf { it.isNotBlank() }
-                        ?: parts.dropLast(1).joinToString("-").replace(Regex("""^\d+-"""), "")
-                            .takeIf { it.isNotBlank() } ?: path
-                    results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries))
-                }
-            }
-        }
-        // ثالثاً: ابحث في دفعات RSC (Next.js streaming payload)
-        if (results.isEmpty()) {
-            val names = nextDataName.findAll(html).map { it.groupValues[1] }.toList()
-            val urls = nextDataNameUrl.findAll(html).map { it.groupValues[1] }.toList()
-            val covers = nextDataCover.findAll(html).map { it.groupValues[1] }.toList()
-            for (i in urls.indices) {
-                val rel = urls[i]
+
+        // الأولوية الأولى: البحث في حمولة RSC (Next.js Streaming) - تحتوي على أفضل البيانات
+        // توفر حمولة RSC titles نظيفة ومعالجة بشكل صحيح، ومعالجة دقيقة للمسافات
+        val rscNames = nextDataName.findAll(html).map { it.groupValues[1] }.toList()
+        val rscUrls = nextDataNameUrl.findAll(html).map { it.groupValues[1] }.toList()
+        val rscCovers = nextDataCover.findAll(html).map { it.groupValues[1] }.toList()
+
+        // الأولوية الأولى: البحث في RSC فقط
+        if (rscNames.isNotEmpty() && rscUrls.isNotEmpty()) {
+            for (i in rscUrls.indices) {
+                val rel = rscUrls[i]
                 val decoded = decodeTitle(rel)
                 val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
                 val parts = path.split("-")
@@ -229,15 +191,62 @@ class NetShortProvider : MainAPI() {
                 if (!showId.all { it.isDigit() }) continue
                 val url = "$mainUrl$rel"
                 if (seen.add(url)) {
-                    val title = (names.getOrNull(i) ?: parts.dropLast(1).joinToString("-").replace(Regex("""^\d+-"""), ""))
-                        .takeIf { it.isNotBlank() } ?: path
-                    val poster = covers.getOrNull(i)
+                    // RSC يوفر أسماء نظيفة بالفعل بعد فك ترميزها
+                    val title = rscNames.getOrNull(i)?.takeIf { it.isNotBlank() }
+                        ?: parts.dropLast(1).joinToString("-").replace(Regex("""^\\d+-"""), "")
+                            .takeIf { it.isNotBlank() } ?: path
+                    val poster = rscCovers.getOrNull(i)
                     results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                         this.posterUrl = poster
                     })
                 }
             }
+        } else {
+            // الاحتياطي الثاني: HTML المباشر إذا فشل RSC بالكامل
+            // فقط إذا لم يتم الحصول على أي نتائج من RSC
+            for (m in cardRegex.findAll(html)) {
+                val raw = m.groupValues[1]
+                val decoded = decodeTitle(raw)
+                val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
+                val parts = path.split("-")
+                if (parts.size < 3) continue
+                val showId = parts.last()
+                if (!showId.all { it.isDigit() }) continue
+                val title = parts.dropLast(2).joinToString("-").replace(Regex("""^\\d+-"""), "").trim()
+                if (title.isBlank()) continue
+                val url = "$mainUrl$raw"
+                if (seen.add(url)) {
+                    val block = html.substring(m.range.first, m.range.last + 1)
+                    val poster = posterInCardRegex.find(block)?.groupValues?.get(1)
+                    results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                        this.posterUrl = poster
+                    })
+                }
+            }
+
+            // الاحتياطي الثالث: HTML مباشرة عن روابط /ar/episode/ إذا لم توجد نتائج من السابق
+            if (results.isEmpty()) {
+                val htmlLinks = htmlEpLinkRegex.findAll(html).map { it.groupValues[1] }.toList()
+                val htmlTitles = htmlEpTitleRegex.findAll(html).map { it.groupValues[1] }.toList()
+                var tIdx = 0
+                for (raw in htmlLinks) {
+                    val decoded = decodeTitle(raw)
+                    val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
+                    val parts = path.split("-")
+                    if (parts.size < 2) continue
+                    val showId = parts.last()
+                    if (!showId.all { it.isDigit() }) continue
+                    val url = "$mainUrl$raw"
+                    if (seen.add(url)) {
+                        val title = htmlTitles.getOrNull(tIdx++)?.takeIf { it.isNotBlank() }
+                            ?: parts.dropLast(1).joinToString("-").replace(Regex("""^\\d+-"""), "")
+                                .takeIf { it.isNotBlank() } ?: path
+                        results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries))
+                    }
+                }
+            }
         }
+
         return results
     }
 
@@ -249,7 +258,7 @@ class NetShortProvider : MainAPI() {
         if (parts.size < 3) return null
         val showId = parts.last()
         if (!showId.all { it.isDigit() }) return null
-        val title = parts.dropLast(2).joinToString("-").replace(Regex("""^\d+-"""), "").trim()
+        val title = parts.dropLast(2).joinToString("-").replace(Regex("""^\\d+-"""), "").trim()
         if (title.isBlank()) return null
         val block = html.substring(m.range.first, m.range.last + 1)
         val poster = posterInCardRegex.find(block)?.groupValues?.get(1)
@@ -308,8 +317,8 @@ class NetShortProvider : MainAPI() {
 
     private val epRefRegex = Regex("""<a\s+href="(/ar/episode/[^"]+)"\s+class="video_item[^"]*"""")
     // أنماط إضافية من حمولة RSC لصفحة الحلقة (اقتباسات مهرّبة)
-    private val rscInitialEpRegex = Regex("""\\"initialCurrentEpisodeInfo\\"\s*:\s*\{[^}]*?\\"episodeNo\\"\s*:\s*(\d+)""")
-    private val rscTotalEpRegex = Regex("""\\"totalEpisode\\"\s*:\s*(\d+)""")
+    private val rscInitialEpRegex = Regex("""\\"initialCurrentEpisodeInfo\\"\s*:\s*\{[^}]*?\\"episodeNo\\"\s*:\s*(\\d+)""")
+    private val rscTotalEpRegex = Regex("""\\"totalEpisode\\"\s*:\s*(\\d+)""")
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
@@ -320,7 +329,7 @@ class NetShortProvider : MainAPI() {
                 val h1 = Regex("""<h1[^>]*>([^<]+)</h1>""").find(res)?.groupValues?.get(1)?.trim()
                 if (!h1.isNullOrBlank()) h1
                 else path.split("-").dropLast(2).joinToString("-")
-                    .replace(Regex("""^\d+-"""), "").trim().ifBlank { "NetShort" }
+                    .replace(Regex("""^\\d+-"""), "").trim().ifBlank { "NetShort" }
             }
             val plot = Regex("""<meta\s+name="description"\s+content="([^"]+)""")
                 .find(res)?.groupValues?.get(1)
