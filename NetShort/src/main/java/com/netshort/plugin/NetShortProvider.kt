@@ -154,6 +154,36 @@ class NetShortProvider : MainAPI() {
     private val htmlEpTitleRegex = Regex("""title="([^"]+)""")
     private val posterInCardRegex = Regex("""class="poster[^\"]*"\s+src="([^"]+)"""")
 
+    // تحليل بطاقات HTML في الصفحة الرئيسية (يعمل بغض النظر عن User-Agent)
+    // البنية: <a href="/ar/episode/{slug}-{id}">{TEXT}</a><img alt="{TITLE}" src="{POSTER}">  (مميز)
+    //         <a href="/ar/episode/{slug}-{id}"><div ...><img alt="{TITLE}" src="{POSTER}">   (شبكة)
+    // العنوان الكامل من نص الرابط أو من alt الصورة (وليس من slug المقطوع)
+    private fun htmlCardShows(html: String): List<SearchResponse> {
+        val results = mutableListOf<SearchResponse>()
+        val seen = mutableSetOf<String>()
+        val anchorRe = Regex("""<a\s+href="(/ar/episode/[^"?#]+)"[^>]*>([\s\S]*?)</a>""")
+        for (m in anchorRe.findAll(html)) {
+            val raw = m.groupValues[1]
+            val inner = m.groupValues[2]
+            var title = Regex("""<img\b[^>]*\balt="([^"]+)"""").find(inner)?.groupValues?.get(1)
+            if (title.isNullOrBlank()) {
+                title = inner.replace(Regex("""<[^>]+>"""), " ").replace(Regex("""\s+"""), " ").trim()
+            }
+            if (title.isNullOrBlank() || title.length < 2) continue
+            val url = "$mainUrl$raw"
+            if (!seen.add(url)) continue
+            var poster = Regex("""<img\b[^>]*?\bsrc="(https://[^"]+)"""").find(inner)?.groupValues?.get(1)
+            if (poster.isNullOrBlank()) {
+                val window = html.substring(m.range.last + 1, minOf(html.length, m.range.last + 1 + 400))
+                poster = Regex("""<img\b[^>]*?\bsrc="(https://[^"]+)"""").find(window)?.groupValues?.get(1)
+            }
+            results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                this.posterUrl = cleanCoverUrl(poster)
+            })
+        }
+        return results
+    }
+
     private fun decodeTitle(encoded: String): String =
         try { java.net.URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8") }
         catch (e: Exception) { encoded }
@@ -282,17 +312,15 @@ class NetShortProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             // الصفحة الرئيسية الحقيقية https://netshort.com/ar تحتوي على كل المسلسلات
-            val pageNum = if (page <= 1) 1 else page
-            val path = if (pageNum == 1) "$mainUrl/ar" else "$mainUrl/ar"
+            val path = "$mainUrl/ar"
             val res = app.get(path, referer = mainUrl, headers = mapOf("User-Agent" to NS_UA)).text
             val seen = mutableSetOf<String>()
-            val cardItems = cardRegex.findAll(res).mapNotNull { m ->
-                val item = parseCard(res, m)
-                if (item != null && seen.add(item.url)) item else null
-            }.toList()
-            val finalItems = if (cardItems.isNotEmpty()) cardItems else {
-                val rsc = parseShowList(res)
-                rsc.filter { seen.add(it.url) }
+
+            // 1) بطاقات HTML أولاً (تعمل مع أي User-Agent، العناوين كاملة)
+            val htmlItems = htmlCardShows(res).filter { seen.add(it.url) }
+            val finalItems = if (htmlItems.isNotEmpty()) htmlItems else {
+                val rsc = parseShowList(res).filter { seen.add(it.url) }
+                rsc
             }
             if (finalItems.isEmpty()) null else newHomePageResponse(request.name, finalItems)
         } catch (e: Exception) { null }
@@ -320,10 +348,9 @@ class NetShortProvider : MainAPI() {
             }
 
             if (results.isEmpty()) {
-                val items = cardRegex.findAll(res).mapNotNull { m ->
-                    val item = parseCard(res, m)
-                    if (item != null && seen.add(item.url) && item.name.lowercase().contains(searchLower)) item else null
-                }.toList()
+                val items = htmlCardShows(res).filter {
+                    seen.add(it.url) && it.name.lowercase().contains(searchLower)
+                }
                 results.addAll(items)
             }
             results

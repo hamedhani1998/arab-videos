@@ -143,12 +143,11 @@ class ShortTVProvider : MainAPI() {
                 epListNode.mapNotNull { ref ->
                     val epObj = resolveRef(data, ref.asInt()) ?: return@mapNotNull null
                     val num = epObj.get("episodeNum")?.asInt() ?: return@mapNotNull null
-                    val isFree = num <= lockBegin
                     val encNode = epObj.get("encryptedVideoUrl")
                     var u480: String? = null; var u720: String? = null; var u1080: String? = null
                     if (encNode != null && encNode.isInt) {
                         val str = resolveRef(data, encNode.asInt())?.asText()
-                        if (str != null) {
+                        if (str != null && str.isNotBlank()) {
                             try {
                                 val obj = mapper.readTree(str)
                                 u480 = obj.get("video_480")?.asText()
@@ -157,6 +156,8 @@ class ShortTVProvider : MainAPI() {
                             } catch (_: Exception) {}
                         }
                     }
+                    // "free" = يوجد رابط تشغيل فعلي في الصفحة (المتبقية مقفلة بدون m3u8)
+                    val isFree = !u480.isNullOrBlank() || !u720.isNullOrBlank() || !u1080.isNullOrBlank()
                     EpisodeInfo(num, u480, u720, u1080, isFree)
                 }
             } else emptyList()
@@ -213,11 +214,14 @@ class ShortTVProvider : MainAPI() {
                 }
             }
             val sortedEps = episodes.sortedBy { it.episodeNum }
-            val eps = sortedEps.mapIndexed { index, ep ->
+            // نعرض الحلقات القابلة للتشغيل فقط (التي لديها رابط m3u8 فعلي)؛
+            // الحلقات المقفلة في الصفحة ليس لها encryptedVideoUrl → لن تظهر كروابط ميتة
+            val playable = sortedEps.filter { it.isFree }
+            val eps = playable.mapIndexed { index, ep ->
                 val serialNo = index + 1
                 newEpisode("$effectiveShortPlayId|${ep.episodeNum}") {
                     episode = serialNo
-                    name = if (ep.isFree) "الحلقة $serialNo" else "🔒 الحلقة $serialNo"
+                    name = "الحلقة $serialNo"
                 }
             }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
@@ -242,6 +246,8 @@ class ShortTVProvider : MainAPI() {
                 val encNode = epObj.get("encryptedVideoUrl") ?: continue
                 if (!encNode.isInt) continue
                 val str = resolveRef(nuxt, encNode.asInt())?.asText() ?: continue
+                // الحلقات المقفلة تأتي encryptedVideoUrl="" (بدون روابط) → ليست قابلة للتشغيل
+                if (str.isBlank()) return null
                 return try {
                     val obj = mapper.readTree(str)
                     Triple(
