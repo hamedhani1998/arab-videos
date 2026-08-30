@@ -255,7 +255,8 @@ class ReelShortProvider : MainAPI() {
         val playable = episodes.filter { isVttFamily(it.videoPic) }
         if (playable.isNotEmpty()) {
             val eps = playable.map { e ->
-                val data0 = "${e.chapterId ?: ""}|${e.videoPic ?: ""}"
+                // نمرر video_pic مباشرة لاستخراج master m3u8 منه
+                val data0 = "${e.videoPic ?: ""}||${e.serialNumber}"
                 newEpisode(data0) {
                     episode = e.serialNumber
                     name = "الحلقة ${e.serialNumber}"
@@ -272,15 +273,17 @@ class ReelShortProvider : MainAPI() {
         if (episodes.isNotEmpty()) {
             val trailer = extractTrailerM3u8(res)
             val eps = episodes.map { e ->
-                val data0 = if (trailer != null) "trailer|$trailer" else ""
+                // نجرب كل حلقة على حدة - بعض الحلقات قد يكون فيها VTT
+                val data0 = "${e.videoPic ?: ""}||${e.serialNumber}"
                 newEpisode(data0) {
                     episode = e.serialNumber
-                    name = "الحلقة ${e.serialNumber} (إعلان)"
+                    name = if (isVttFamily(e.videoPic)) "الحلقة ${e.serialNumber}"
+                        else "الحلقة ${e.serialNumber} (إعلان)"
                 }
             }
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 this.posterUrl = cover
-                this.plot = (plot?.let { "$it • " } ?: "") + "إعلان/معاينة فقط — روابط التشغيل الكاملة غير متاحة"
+                this.plot = plot
             }
         }
 
@@ -293,38 +296,22 @@ class ReelShortProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
+        // data format: "videoPic||serialNumber"
+        val parts = data.split("||")
         if (parts.size < 2) return false
-        val chapterId = parts[0]
-        val videoPic = parts[1]
-        // 0) رابط الإعلان/المعاينة (محتوى قديم /Snapshots/)
-        if (chapterId == "trailer" && videoPic.isNotBlank()) {
-            callback(newExtractorLink(name, "ReelShort (إعلان)", videoPic, ExtractorLinkType.M3U8) {
-                referer = mainUrl
-                quality = getQualityFromName("720p")
-            })
-            return true
-        }
-        // 1) المسار الرئيسي: عائلة VTT (يمكن استخراج كل الحلقات)
+        val videoPic = parts[0]
+        val serialNumber = parts[1]
+
+        // المسار الرئيسي: عائلة VTT (يمكن استخراج master m3u8)
         if (videoPic.isNotBlank() && isVttFamily(videoPic)) {
             val master = vttMasterUrl(videoPic) ?: return false
             return try {
                 val masterText = app.get(master, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
-                callback(newExtractorLink(name, "ReelShort 1080p", master, ExtractorLinkType.M3U8) {
+                callback(newExtractorLink(name, "ReelShort $serialNumber", master, ExtractorLinkType.M3U8) {
                     referer = mainUrl
                     quality = getQualityFromName("1080p")
                 })
-                for (lang in langNames.keys) {
-                    val subUrl = master.replaceAfterLast("/", "subtitle/$lang.m3u8")
-                    callback(newExtractorLink(
-                        source = name,
-                        name = "ReelShort $lang",
-                        url = subUrl,
-                        type = ExtractorLinkType.M3U8,
-                    ) {
-                        referer = mainUrl
-                    })
-                }
+                // استخرج الترجمة من master playlist
                 val subRegex = Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES[^>]*NAME="([^"]+)"[^>]*URI="([^"]+)"""")
                 for (m in subRegex.findAll(masterText)) {
                     val lang = m.groupValues[1]
@@ -337,11 +324,10 @@ class ReelShortProvider : MainAPI() {
                     try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
                 }
                 true
-            } catch (e: Exception) {
-                false
-            }
+            } catch (e: Exception) { false }
         }
-        // 2) المسار البديل: محتوى قديم بنمط /Snapshots/ (نُمرّر الإعلان/المعاينة فقط)
+
+        // المسار البديل: محتوى قديم بنمط /Snapshots/ - لا يوجد روابط كاملة
         return false
     }
 }

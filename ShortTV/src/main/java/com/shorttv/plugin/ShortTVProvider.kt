@@ -7,7 +7,6 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URL
-import java.util.Base64
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -23,54 +22,42 @@ class ShortTVProvider : MainAPI() {
         "ar" to "أحدث الدراما",
     )
 
-    // رابط صفحة المسلسل الكامل: /ar/drama/{slug}-{showId}
+    // رابط صفحة المسلسل: /ar/drama/{slug}-{showId}
     private val dramaLinkRegex = Regex("""/ar/drama/([^"'\\?]+)""")
     // رابط صفحة الحلقة: /ar/episode/{slug}-{showId}-{ep}
     private val episodeLinkRegex = Regex("""/ar/episode/([^"'\\?]+)""")
-    // poster: <img data-src="https://akamai-static.shorttv.live/images/cover/.../xxx.jpg"
-    private val posterRegex = Regex("""data-src="(https://akamai-static\.shorttv\.live/images/cover/[^"]+\.jpg)""")
-    // عنوان بطاقة العرض
-    private val cardTitleRegex = Regex("""<p class="card-title"[^>]*>([^<]+)</p>""")
-
-    private fun unescape(s: String): String =
-        s.replace("\\/", "/").replace("\\u0026", "&")
-
-    // فك ترميز الاسم من المسار
-    private fun cleanName(encoded: String): String {
-        var name = try {
-            java.net.URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8")
-        } catch (e: Exception) {
-            encoded
-        }
-        name = name.replace("---", " ").replace("-", " ")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-        name = name.removePrefix("مدبلج").removeSuffix("مدبلج").trim()
-        return name
-    }
 
     // استخراج __NUXT_DATA__ من صفحة ShortTV
     private fun extractNuxtData(html: String): JsonNode? {
         val regex = Regex("""<script[^>]*id="__NUXT_DATA__"[^>]*>([\s\S]*?)</script>""")
         val match = regex.find(html) ?: return null
-        return try {
-            mapper.readTree(match.groupValues[1])
-        } catch (e: Exception) {
-            null
+        return try { mapper.readTree(match.groupValues[1]) } catch (e: Exception) { null }
+    }
+
+    // حلّ مرجع __NUXT_DATA__
+    private fun resolveRef(data: JsonNode, idx: Int, maxHops: Int = 6): JsonNode? {
+        var cur: JsonNode? = data.get(idx) ?: return null
+        var hops = 0
+        while (cur != null && cur.isNumber && cur.asInt() < data.size() && hops < maxHops) {
+            cur = data.get(cur.asInt())
+            hops++
         }
+        return cur
     }
 
     // تحليل قائمة العروض من صفحة ShortTV الرئيسية
     private fun parseShowList(html: String): List<SearchResponse> {
         val data = extractNuxtData(html) ?: return emptyList()
         val results = mutableListOf<SearchResponse>()
+        val seen = mutableSetOf<String>()
         for (i in 0 until data.size()) {
             val e = data.get(i) ?: continue
             if (!e.isObject) continue
             if (!e.has("shortPlayId")) continue
             val playId = resolveRef(data, e.get("shortPlayId").asInt())?.asText() ?: continue
+            if (!seen.add(playId)) continue
             val titleNode = resolveRef(data, e.get("lanShortPlayName")?.asInt() ?: -1)
-            val title = titleNode?.asText()?.takeIf { it.isNotBlank() } ?: continue
+            val title = titleNode?.asText()?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) } ?: continue
             val posterNode = resolveRef(data, e.get("lanCoverId")?.asInt() ?: -1)
             val poster = posterNode?.asText()
             val url = "$mainUrl/ar/drama/$playId"
@@ -81,30 +68,16 @@ class ShortTVProvider : MainAPI() {
         return results
     }
 
-    // من مسار /ar/drama/{slug}-{showId} أو /ar/episode/{slug}-{showId}-{ep} نستخرج showId
-    // المسار قد يكون URL-encoded وقد يحتوي على كلمات مثل "مدبلج" ملتصقة بالكلمة الأخيرة
+    // من مسار /ar/drama/{slug}-{showId} نستخرج showId
     private fun showIdFromPath(rawPath: String): String? {
         val path = try { java.net.URLDecoder.decode(rawPath, "UTF-8") } catch (e: Exception) { rawPath }
         val parts = path.split("-")
         if (parts.isEmpty()) return null
-        // المعرّف الرقمي في آخر مقطع (أو قبله لو كان "مدبلج")
         for (i in parts.indices.reversed()) {
             val seg = parts[i]
             if (seg.length >= 3 && seg.all(Char::isDigit)) return seg
         }
         return null
-    }
-
-    // حلّ مرجع __NUXT_DATA__: مرجع رقمي يقفز إلى entry آخر، أو القيمة المباشرة
-    // ملاحظة: الرقم الذي يساوي أو يتجاوز حجم المصفوفة هو قيمة مباشرة وليس مرجعاً
-    private fun resolveRef(data: JsonNode, idx: Int, maxHops: Int = 6): JsonNode? {
-        var cur: JsonNode? = data.get(idx) ?: return null
-        var hops = 0
-        while (cur != null && cur.isNumber && cur.asInt() < data.size() && hops < maxHops) {
-            cur = data.get(cur.asInt())
-            hops++
-        }
-        return cur
     }
 
     private data class ShowInfo(
@@ -126,14 +99,13 @@ class ShortTVProvider : MainAPI() {
 
     // يحلّل __NUXT_DATA__ في صفحة الحلقة ويستخرج معلومات المسلسل + قائمة الحلقات
     private fun parseShowFromNuxt(data: JsonNode): ShowInfo? {
-        // ابحث عن كائن يحوي shortPlayId و episodeList
         for (i in 0 until data.size()) {
             val e = data.get(i)
             if (e == null || e.isNull || !e.isObject) continue
             if (!e.has("shortPlayId") || !e.has("episodeList")) continue
             val playId = resolveRef(data, e.get("shortPlayId").asInt())?.asText() ?: continue
             val titleNode = resolveRef(data, e.get("lanShortPlayName")?.asInt() ?: -1)
-            val title = titleNode?.asText() ?: playId
+            val title = titleNode?.asText()?.takeIf { it.isNotBlank() } ?: playId
             val posterNode = resolveRef(data, e.get("lanCoverId")?.asInt() ?: -1)
             val poster = posterNode?.asText()
             val descNode = resolveRef(data, e.get("lanShortPlayDescription")?.asInt() ?: -1)
@@ -172,52 +144,41 @@ class ShortTVProvider : MainAPI() {
             val res = app.get("$mainUrl/${request.data}", referer = mainUrl).text
             val items = parseShowList(res)
             if (items.isEmpty()) null else newHomePageResponse(request.name, items)
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
-    // البحث على ShortTV: نرشّح من قائمة الصفحة الرئيسية
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val res = app.get("$mainUrl/ar", referer = mainUrl).text
             val all = parseShowList(res)
             val q = query.trim().lowercase()
-            all.filter { it.name.lowercase().contains(q) }
-        } catch (e: Exception) {
-            emptyList()
-        }
+            if (q.isBlank()) all else all.filter { it.name.lowercase().contains(q) }
+        } catch (e: Exception) { emptyList() }
     }
-
-    // data المخزّن: "{shortPlayId}|{episodeNum}"
-    private fun dataForEpisode(shortPlayId: String, ep: Int): String = "$shortPlayId|$ep"
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            // نستخرج showId من URL (يمكن أن يكون /ar/drama/... أو /ar/episode/...)
+            // نستخرج showId من URL
             val path = url.substringAfter("/ar/").substringAfter("/")
             val showId = showIdFromPath(path) ?: return null
             // صفحة الحلقة الأولى تحوي بيانات المسلسل كاملة في __NUXT_DATA__
             val res = app.get("$mainUrl/ar/episode/$showId-1", referer = mainUrl).text
             val nuxt = extractNuxtData(res)
             val show = nuxt?.let { parseShowFromNuxt(it) }
-            // قد يكون shortPlayId في NUXT_DATA مشفّراً؛ نعتمد على showId من الـ URL
             val effectiveShortPlayId = show?.shortPlayId?.takeIf { it.all(Char::isDigit) } ?: showId
             val episodes = show?.episodeList ?: emptyList()
-            // العنوان: من NUXT_DATA__ أولاً، ثم og:title من HTML، ثم h1
+            // العنوان: من NUXT_DATA__ أولاً، ثم og:title من HTML
             val nuxtTitle = show?.title?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) }
             val ogTitle = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
                 .find(res)?.groupValues?.get(1)?.trim()
             val h1 = Regex("""<h1[^>]*>([^<]+)</h1>""").find(res)?.groupValues?.get(1)?.trim()
             val title = nuxtTitle ?: ogTitle ?: h1 ?: "ShortTV #$showId"
             val plot = show?.description
-            // الملصق: من NUXT_DATA__ أولاً، ثم og:image من HTML
             val nuxtPoster = show?.poster
             val ogImage = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
                 .find(res)?.groupValues?.get(1)
             val poster = nuxtPoster ?: ogImage
             if (episodes.isEmpty()) {
-                // نُرجع عنصر واحد على الأقل — التشغيل سيُحاول الجلب من صفحة الحلقة
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(
                     newEpisode("$showId|1") { episode = 1; name = "الحلقة 1" }
                 )) {
@@ -225,8 +186,6 @@ class ShortTVProvider : MainAPI() {
                     this.plot = plot
                 }
             }
-            // نُرتب الحلقات حسب episodeNum ونمنح كل منها رقم تسلسلي (1..N)
-            // لأن episodeNum هو معرّف الحلقة وليس رقمها الحقيقي
             val sortedEps = episodes.sortedBy { it.episodeNum }
             val eps = sortedEps.mapIndexed { index, ep ->
                 val serialNo = index + 1
@@ -239,9 +198,7 @@ class ShortTVProvider : MainAPI() {
                 this.posterUrl = poster
                 this.plot = plot
             }
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
     // استخراج معلومات الحلقة من __NUXT_DATA__ لمعرّف معيّن
@@ -283,7 +240,7 @@ class ShortTVProvider : MainAPI() {
             if (parts.size != 2) return false
             val shortPlayId = parts[0]
             val ep = parts[1].toIntOrNull() ?: return false
-            // صفحة الحلقة الأولى للمسلسل تكفي لاستخراج كل الحلقات (تحوي قائمة كاملة)
+            // صفحة الحلقة الأولى للمسلسل تكفي لاستخراج كل الحلقات
             val res = app.get("$mainUrl/ar/episode/${shortPlayId}-1", referer = mainUrl).text
             val urls = findEpisodeUrls(res, ep) ?: return false
             var found = false
@@ -306,8 +263,6 @@ class ShortTVProvider : MainAPI() {
                 found = true
             }
             found
-        } catch (e: Exception) {
-            false
-        }
+        } catch (e: Exception) { false }
     }
 }

@@ -293,16 +293,43 @@ class NetShortProvider : MainAPI() {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
             val res = app.get("$mainUrl/ar/search?keywords=$q&type=categories", referer = mainUrl).text
+            // استخرج الأسماء من RSC وفلترها حسب البحث
+            val rscNames = nextDataName.findAll(res).map { it.groupValues[1] }.toList()
+            val rscUrls = nextDataNameUrl.findAll(res).map { it.groupValues[1] }.toList()
+            val rscCovers = nextDataCover.findAll(res).map { it.groupValues[1] }.toList()
+            val searchLower = query.trim().lowercase()
             val seen = mutableSetOf<String>()
-            val items = cardRegex.findAll(res).mapNotNull { m ->
-                val item = parseCard(res, m)
-                if (item != null && seen.add(item.url)) item else null
-            }.toList()
-            val finalItems = if (items.isNotEmpty()) items else {
-                val rsc = parseShowList(res)
-                rsc.filter { seen.add(it.url) }
+            val results = mutableListOf<SearchResponse>()
+            if (rscNames.isNotEmpty() && rscUrls.isNotEmpty()) {
+                for (i in rscUrls.indices) {
+                    val name = rscNames.getOrNull(i) ?: continue
+                    // فلترة: الاسم يجب أن يحتوي كلمة البحث
+                    if (!name.lowercase().contains(searchLower)) continue
+                    val rel = rscUrls[i]
+                    val decoded = decodeTitle(rel)
+                    val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
+                    val parts = path.split("-")
+                    if (parts.size < 2) continue
+                    val showId = parts.last()
+                    if (!showId.all { it.isDigit() }) continue
+                    val url = "$mainUrl$rel"
+                    if (seen.add(url)) {
+                        val poster = rscCovers.getOrNull(i)
+                        results.add(newTvSeriesSearchResponse(name, url, TvType.TvSeries) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
             }
-            finalItems
+            // احتياطي: HTML
+            if (results.isEmpty()) {
+                val items = cardRegex.findAll(res).mapNotNull { m ->
+                    val item = parseCard(res, m)
+                    if (item != null && seen.add(item.url) && item.name.lowercase().contains(searchLower)) item else null
+                }.toList()
+                results.addAll(items)
+            }
+            results
         } catch (e: Exception) {
             null
         }
@@ -326,10 +353,21 @@ class NetShortProvider : MainAPI() {
             val path = url.substringAfter("/ar/episode/").substringBefore("?")
             val shortPlayId = extractShortPlayIdFromPath(path) ?: return null
             val title = run {
-                val h1 = Regex("""<h1[^>]*>([^<]+)</h1>""").find(res)?.groupValues?.get(1)?.trim()
-                if (!h1.isNullOrBlank()) h1
-                else path.split("-").dropLast(2).joinToString("-")
-                    .replace(Regex("""^\\d+-"""), "").trim().ifBlank { "NetShort" }
+                // استخرج الاسم من RSC (أوضح من HTML)
+                val rscTitle = nextDataName.find(res)?.groupValues?.get(1)?.trim()
+                if (!rscTitle.isNullOrBlank()) rscTitle
+                else {
+                    // نظّف og:title من النصوص الزائدة
+                    val og = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
+                        .find(res)?.groupValues?.get(1)?.trim()
+                    if (!og.isNullOrBlank()) {
+                        og.replace(Regex("""^الآن عبر الإنترنت\s*-\s*NetShort\s*"""), "")
+                            .replace(Regex("""\s*شاهد\s*$"""), "")
+                            .replace(Regex("""\s*\|\s*NetShort$"""), "")
+                            .trim()
+                    } else path.split("-").dropLast(2).joinToString("-")
+                        .replace(Regex("""^\\d+-"""), "").trim().ifBlank { "NetShort" }
+                }
             }
             val plot = Regex("""<meta\s+name="description"\s+content="([^"]+)""")
                 .find(res)?.groupValues?.get(1)
@@ -337,7 +375,7 @@ class NetShortProvider : MainAPI() {
                 .find(res)?.groupValues?.get(1)
 
             val epLinks = epRefRegex.findAll(res).map { it.groupValues[1] }.toSet()
-            val data = nsPost("/web/web/v3/detail_info/episode_info/cascade_label",
+            val data = nsPost("/web/v3/detail_info/episode_info/cascade_label",
                 mapOf("shortPlayId" to shortPlayId, "language" to "ar_AE"))
             val videoEps = (data?.get("videoEpisodeInfos") as? List<*>)
             val epNums: List<Int> = if (videoEps != null) {
@@ -347,10 +385,8 @@ class NetShortProvider : MainAPI() {
                     ?: emptyList()
             } else emptyList()
 
-            // احتياطي: استخرج العدد الإجمالي للحلقات من RSC
-            val totalFromRsc = rscTotalEpRegex.findAll(res).map { it.groupValues[1].toIntOrNull() ?: 0 }
-                .filter { it > 0 }.maxOrNull()
-            val initialEpFromRsc = rscInitialEpRegex.find(res)?.groupValues?.get(1)?.toIntOrNull()
+            // احتياطي: استخرج العدد الإجمالي للحلقات من RSC (الأول = حلقات هذا المسلسل)
+            val totalFromRsc = rscTotalEpRegex.find(res)?.groupValues?.get(1)?.toIntOrNull()
 
             val eps = mutableListOf<Episode>()
             val seen = HashSet<Int>()
@@ -373,7 +409,6 @@ class NetShortProvider : MainAPI() {
                     }
                 }
             } else {
-                var n = 1
                 for (ep in epLinks) {
                     val epPath = decodeTitle(ep).removePrefix("/ar/episode/").substringBefore("?")
                     val epParts = epPath.split("-")
@@ -384,7 +419,6 @@ class NetShortProvider : MainAPI() {
                             name = "الحلقة $num"
                         })
                     }
-                    n++
                 }
             }
             if (eps.isEmpty()) return null
