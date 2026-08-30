@@ -49,6 +49,12 @@ class ReelShortProvider : MainAPI() {
     private fun isVodFamily(videoPic: String?): Boolean =
         videoPic != null && videoPic.contains("/Snapshots/")
 
+    // استخراج رابط الإعلان/المعاينة (m3u8) من contentUrl في JSON-LD schema.org
+    private fun extractTrailerM3u8(html: String): String? {
+        val regex = Regex("""\"contentUrl\"\s*:\s*\"(https://[^\"]+\.m3u8[^\"]*)\"""")
+        return regex.find(html)?.groupValues?.get(1)
+    }
+
     private fun parseBooksList(node: JsonNode?): List<Book> {
         if (node == null) return emptyList()
         val list: JsonNode? = if (node.isArray) node
@@ -160,6 +166,9 @@ class ReelShortProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val bookId = url.substringAfterLast("/").substringBefore("?")
+        val res = try {
+            app.get("$mainUrl/ar/movie/$bookId", headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+        } catch (e: Exception) { "" }
         val root = loadNextData("/ar/movie/$bookId") ?: return null
         val data = root.get("props")?.get("pageProps")?.get("data") ?: return null
         val title = textOrNull(data, "book_title") ?: return null
@@ -169,26 +178,7 @@ class ReelShortProvider : MainAPI() {
         val originalLang = textOrNull(data, "original_lang")
         val isDub = (data.get("is_dub")?.let { if (it.isNumber) it.asInt() == 1 else false }) == true
         val episodes = parseEpisodes(data)
-        if (episodes.isEmpty()) return null
 
-        val firstVideoPic = episodes.firstOrNull()?.videoPic
-        val vtt = isVttFamily(firstVideoPic)
-        // نستبعد الكتب التي كلها نمط /Snapshots/ (لا توجد روابط تشغيل)
-        val playable = episodes.filter { e -> isVttFamily(e.videoPic) }
-        if (playable.isEmpty()) return null
-        val effectiveEpisodes = if (vtt) playable else episodes
-
-        val eps = effectiveEpisodes.map { e ->
-            val data0 = if (isVttFamily(e.videoPic)) {
-                "${e.chapterId ?: ""}|${e.videoPic ?: ""}"
-            } else {
-                "${e.chapterId ?: ""}|"
-            }
-            newEpisode(data0) {
-                episode = e.serialNumber
-                name = "الحلقة ${e.serialNumber}"
-            }
-        }
         val plot = buildString {
             if (!desc.isNullOrBlank()) append(desc)
             if (!lang.isNullOrBlank()) {
@@ -205,10 +195,34 @@ class ReelShortProvider : MainAPI() {
             }
         }.ifBlank { null }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
-            this.posterUrl = cover
-            this.plot = plot
+        // حالة 1: توجد حلقات قابلة للتشغيل (VTT) — رجّع سلسلة
+        val playable = episodes.filter { isVttFamily(it.videoPic) }
+        if (playable.isNotEmpty()) {
+            val eps = playable.map { e ->
+                val data0 = "${e.chapterId ?: ""}|${e.videoPic ?: ""}"
+                newEpisode(data0) {
+                    episode = e.serialNumber
+                    name = "الحلقة ${e.serialNumber}"
+                }
+            }
+            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+                this.posterUrl = cover
+                this.plot = plot
+            }
         }
+
+        // حالة 2: لا توجد VTT، لكن توجد حلقات /Snapshots/ — رجّع كفيلم مع رابط الإعلان/المعاينة
+        if (episodes.isNotEmpty()) {
+            val trailer = extractTrailerM3u8(res)
+            val data0 = if (trailer != null) "trailer|$trailer" else ""
+            val ep = newEpisode(data0) { episode = 1; name = "معاينة" }
+            return newMovieLoadResponse(title, url, TvType.Movie, ep) {
+                this.posterUrl = cover
+                this.plot = (plot?.let { "$it • " } ?: "") + "إعلان/معاينة فقط"
+            }
+        }
+
+        return null
     }
 
     override suspend fun loadLinks(
@@ -221,6 +235,14 @@ class ReelShortProvider : MainAPI() {
         if (parts.size < 2) return false
         val chapterId = parts[0]
         val videoPic = parts[1]
+        // 0) رابط الإعلان/المعاينة (محتوى قديم /Snapshots/)
+        if (chapterId == "trailer" && videoPic.isNotBlank()) {
+            callback(newExtractorLink(name, "ReelShort (إعلان)", videoPic, ExtractorLinkType.M3U8) {
+                referer = mainUrl
+                quality = getQualityFromName("720p")
+            })
+            return true
+        }
         // 1) المسار الرئيسي: عائلة VTT (يمكن استخراج كل الحلقات)
         if (videoPic.isNotBlank() && isVttFamily(videoPic)) {
             val master = vttMasterUrl(videoPic) ?: return false

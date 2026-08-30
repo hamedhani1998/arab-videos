@@ -21,6 +21,8 @@ class FlexTVProvider : MainAPI() {
     private val masterRegex = Regex("""https://resources-sgp-auth\.flextv\.cc/wz/m3u8/[^"\\]+/abr\.m3u8\?auth_key=[^"\\]+""")
 
     // يفكّ اسم العمل (عربي) ومعرّف المسلسل من مسار الحلقة
+    // الصيغة الكاملة: episode-{no}-{name-encoded}-{seriesId}
+    // صيغة قصيرة (من بعض الأماكن): episode-{no}-{seriesId}
     private fun parsePath(path: String): Pair<String, String>? {
         if (!path.startsWith("episode-")) return null
         val parts = path.split("-")
@@ -28,13 +30,17 @@ class FlexTVProvider : MainAPI() {
         val seriesId = parts.last()
         if (!seriesId.all { it.isLetterOrDigit() || it == '_' }) return null
         val encTitle = parts.drop(2).dropLast(1).joinToString("-")
-        if (encTitle.isBlank()) return null
-        val title = try {
-            java.net.URLDecoder.decode(encTitle.replace("+", "%2B"), "UTF-8")
-        } catch (e: Exception) {
-            encTitle
+        val title = if (encTitle.isBlank()) {
+            // لا يوجد جزء اسم — سيُستخرج من og:title في صفحة load()
+            ""
+        } else {
+            try {
+                java.net.URLDecoder.decode(encTitle.replace("+", "%2B"), "UTF-8").trim()
+            } catch (e: Exception) {
+                encTitle
+            }
         }
-        return title.trim() to seriesId
+        return title to seriesId
     }
 
     private fun parseShowList(html: String): List<SearchResponse> {
@@ -47,14 +53,21 @@ class FlexTVProvider : MainAPI() {
         for (m in episodePathRegex.findAll(html)) {
             val path = m.groupValues[1]
             val parsed = parsePath(path) ?: continue
-            val (title, seriesId) = parsed
+            val (rawTitle, seriesId) = parsed
             if (seen.add(seriesId)) {
                 val poster = allPosters.getOrNull(posterIdx)
                 posterIdx++
+                // استخدم المسار الكامل من الصفحة (يحوي العنوان) كي لا يخطئ load()
+                val cardUrl = if (rawTitle.isBlank()) {
+                    "$mainUrl/ar/episodes/episode-1-$seriesId"
+                } else {
+                    "$mainUrl/ar/episodes/$path"
+                }
+                val title = rawTitle.ifBlank { "FlexTV" }
                 results.add(
                     newTvSeriesSearchResponse(
                         title,
-                        "$mainUrl/ar/episodes/episode-1-$seriesId",
+                        cardUrl,
                         TvType.TvSeries
                     ) {
                         this.posterUrl = poster
@@ -94,10 +107,23 @@ class FlexTVProvider : MainAPI() {
             val parsed = parsePath(pathFromUrl)
             val seriesId = parsed?.second
                 ?: return null
-            val urlTitle = parsed?.first ?: "FlexTV"
+            val urlTitle = parsed?.first
 
-            val title = Regex("""<h[12][^>]*>([^<]+)</h[12]>""").find(res)?.groupValues?.get(1)?.trim()
-                ?.takeIf { it.isNotBlank() } ?: urlTitle
+            val ogTitle = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)?.trim()
+            val h1 = Regex("""<h[12][^>]*>([^<]+)</h[12]>""").find(res)?.groupValues?.get(1)?.trim()
+            val resolvedTitle = (h1?.takeIf { it.isNotBlank() }
+                ?: ogTitle?.takeIf { it.isNotBlank() }
+                ?: urlTitle?.takeIf { it.isNotBlank() }
+                ?: "FlexTV")
+            // تنظيف لو كان "مشاهدة X الحلقة 1 مجاناً HD | FlexTV" → X
+            val title = resolvedTitle
+                .replace(Regex("""^مشاهدة\s+"""), "")
+                .replace(Regex("""\s+الحلقة\s+\d+\s+.*$"""), "")
+                .replace(Regex("""\s*\|\s*FlexTV$"""), "")
+                .replace(Regex("""\s+-\s+FlexTV$"""), "")
+                .trim()
+                .ifBlank { resolvedTitle.trim() }
 
             val eps = mutableListOf<Episode>()
             val seenEp = mutableSetOf<Int>()

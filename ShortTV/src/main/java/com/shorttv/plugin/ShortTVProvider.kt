@@ -48,12 +48,17 @@ class ShortTVProvider : MainAPI() {
     }
 
     // من مسار /ar/drama/{slug}-{showId} أو /ar/episode/{slug}-{showId}-{ep} نستخرج showId
-    private fun showIdFromPath(path: String): String? {
+    // المسار قد يكون URL-encoded وقد يحتوي على كلمات مثل "مدبلج" ملتصقة بالكلمة الأخيرة
+    private fun showIdFromPath(rawPath: String): String? {
+        val path = try { java.net.URLDecoder.decode(rawPath, "UTF-8") } catch (e: Exception) { rawPath }
         val parts = path.split("-")
-        if (parts.size < 2) return null
-        val id = parts[parts.size - 2]
-        // معرّف المسلسل رقمي (مثل 18453)
-        return id.takeIf { it.length >= 3 && it.all(Char::isDigit) }
+        if (parts.isEmpty()) return null
+        // المعرّف الرقمي في آخر مقطع (أو قبله لو كان "مدبلج")
+        for (i in parts.indices.reversed()) {
+            val seg = parts[i]
+            if (seg.length >= 3 && seg.all(Char::isDigit)) return seg
+        }
+        return null
     }
 
     private fun extractNuxtData(html: String): JsonNode? {

@@ -145,6 +145,13 @@ class NetShortProvider : MainAPI() {
     private val cardRegex = Regex(
         """<a\s+href="(/ar/episodes/[^"]+)"\s+class="video_item[^"]*"[^>]*>"""
     )
+    // في صفحة NetShort الفعلية لا توجد عناصر video_item في HTML (تُحمَّل من JavaScript).
+    // نستخرج البيانات من self.__next_f.push( ... ) كائنات تحوي shortPlayNameUrl/shortPlayCover
+    private val nextDataNameUrl = Regex("""\"shortPlayNameUrl\"\s*:\s*\"(/ar/episode/[^\"]+)\"""")
+    private val nextDataFullUrl = Regex("""\"fullEpisodeNameUrl\"\s*:\s*\"(/ar/full-episodes/[^\"]+)\"""")
+    private val nextDataName = Regex("""\"shortPlayName\"\s*:\s*\"([^\"]+)\"""")
+    private val nextDataCover = Regex("""\"shortPlayCover\"\s*:\s*\"(https?://[^\"]+)\"""")
+    private val nextDataEpisodes = Regex("""\"totalEpisode\"\s*:\s*(\d+)""")
     private val titleInCardRegex = Regex("""title="([^"]+)"""")
     private val posterInCardRegex = Regex("""class="poster[^"]*"\s+src="([^"]+)"""")
 
@@ -159,38 +166,51 @@ class NetShortProvider : MainAPI() {
             .trim()
     }
 
+    // يستخرج قائمة المسلسلات من دفعات self.__next_f.push
     private fun parseShowList(html: String): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
+        // أولاً: ابحث في HTML الحيّ (لو كان فيه <a href>...)
         for (m in cardRegex.findAll(html)) {
             val raw = m.groupValues[1]
             val decoded = decodeTitle(raw)
-            if (decoded.contains("episode-1-", ignoreCase = true)) {
-                val path = decoded.removePrefix("/ar/episodes/").substringBefore("?")
+            val path = decoded.removePrefix("/ar/episodes/").substringBefore("?")
+            val parts = path.split("-")
+            if (parts.size < 3) continue
+            val showId = parts.last()
+            if (!showId.all { it.isDigit() }) continue
+            val title = parts.dropLast(2).joinToString("-").replace(Regex("""^\d+-"""), "").trim()
+            if (title.isBlank()) continue
+            val url = "$mainUrl$raw"
+            if (seen.add(url)) {
+                val block = html.substring(m.range.first, m.range.last + 1)
+                val poster = posterInCardRegex.find(block)?.groupValues?.get(1)
+                results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                    this.posterUrl = poster
+                })
+            }
+        }
+        // ثانياً: ابحث في دفعات RSC (Next.js streaming payload)
+        if (results.isEmpty()) {
+            val names = nextDataName.findAll(html).map { it.groupValues[1] }.toList()
+            val urls = nextDataNameUrl.findAll(html).map { it.groupValues[1] }.toList()
+            val covers = nextDataCover.findAll(html).map { it.groupValues[1] }.toList()
+            for (i in urls.indices) {
+                val rel = urls[i]
+                val decoded = decodeTitle(rel)
+                val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
                 val parts = path.split("-")
-                if (parts.size < 3) continue
+                if (parts.size < 2) continue
                 val showId = parts.last()
                 if (!showId.all { it.isDigit() }) continue
-                val title = parts.dropLast(2).joinToString("-").replace(Regex("""^\d+-"""), "").trim()
-                if (title.isBlank()) continue
-                val url = "$mainUrl$raw"
+                val url = "$mainUrl$rel"
                 if (seen.add(url)) {
-                    val poster = posterInCardRegex.find(html.substring(m.range.first, m.range.last + 1))?.groupValues?.get(1)
+                    val title = (names.getOrNull(i) ?: parts.dropLast(1).joinToString("-").replace(Regex("""^\d+-"""), ""))
+                        .takeIf { it.isNotBlank() } ?: path
+                    val poster = covers.getOrNull(i)
                     results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                         this.posterUrl = poster
                     })
-                }
-            } else {
-                val path = decoded.removePrefix("/ar/episodes/").substringBefore("?")
-                val parts = path.split("-")
-                if (parts.size < 3) continue
-                val showId = parts.last()
-                if (!showId.all { it.isDigit() }) continue
-                val title = titleFromPath(path)
-                if (title.isBlank()) continue
-                val url = "$mainUrl$raw"
-                if (seen.add(url)) {
-                    results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries))
                 }
             }
         }
@@ -216,13 +236,21 @@ class NetShortProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val res = app.get("$mainUrl/ar/all-episodes", referer = mainUrl).text
+            val pageNum = if (page <= 1) 1 else page
+            val path = if (pageNum == 1) "$mainUrl/ar/all-episodes" else "$mainUrl/ar/all-episodes/page/$pageNum"
+            val res = app.get(path, referer = mainUrl).text
             val seen = mutableSetOf<String>()
+            // ابحث أولاً في HTML الحيّ
             val items = cardRegex.findAll(res).mapNotNull { m ->
                 val item = parseCard(res, m)
                 if (item != null && seen.add(item.url)) item else null
             }.toList()
-            if (items.isEmpty()) null else newHomePageResponse(request.name, items)
+            // ثم في RSC payload
+            val finalItems = if (items.isNotEmpty()) items else {
+                val rsc = parseShowList(res)
+                rsc.filter { seen.add(it.url) }
+            }
+            if (finalItems.isEmpty()) null else newHomePageResponse(request.name, finalItems)
         } catch (e: Exception) {
             null
         }
@@ -237,7 +265,11 @@ class NetShortProvider : MainAPI() {
                 val item = parseCard(res, m)
                 if (item != null && seen.add(item.url)) item else null
             }.toList()
-            items
+            val finalItems = if (items.isNotEmpty()) items else {
+                val rsc = parseShowList(res)
+                rsc.filter { seen.add(it.url) }
+            }
+            finalItems
         } catch (e: Exception) {
             null
         }
@@ -251,6 +283,9 @@ class NetShortProvider : MainAPI() {
     }
 
     private val epRefRegex = Regex("""<a\s+href="(/ar/episodes/[^"]+)"\s+class="video_item[^"]*"""")
+    // أنماط إضافية من حمولة RSC لصفحة الحلقة
+    private val rscInitialEpRegex = Regex("""\"initialCurrentEpisodeInfo\"\\?":\\?\{[^}]*?\"episodeNo\"\\?":\\?(\d+)""")
+    private val rscTotalEpRegex = Regex("""\"totalEpisode\"\\?":\\?(\d+)""")
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
@@ -263,6 +298,10 @@ class NetShortProvider : MainAPI() {
                 else path.split("-").dropLast(2).joinToString("-")
                     .replace(Regex("""^\d+-"""), "").trim().ifBlank { "NetShort" }
             }
+            val plot = Regex("""<meta\s+name="description"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)
+            val poster = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)
 
             val epLinks = epRefRegex.findAll(res).map { it.groupValues[1] }.toSet()
             val data = nsPost("/web/web/v3/detail_info/episode_info/cascade_label",
@@ -275,10 +314,24 @@ class NetShortProvider : MainAPI() {
                     ?: emptyList()
             } else emptyList()
 
+            // احتياطي: استخرج العدد الإجمالي للحلقات من RSC
+            val totalFromRsc = rscTotalEpRegex.findAll(res).map { it.groupValues[1].toIntOrNull() ?: 0 }
+                .filter { it > 0 }.maxOrNull()
+            val initialEpFromRsc = rscInitialEpRegex.find(res)?.groupValues?.get(1)?.toIntOrNull()
+
             val eps = mutableListOf<Episode>()
             val seen = HashSet<Int>()
             if (epNums.isNotEmpty()) {
                 for (n in epNums.sorted()) {
+                    if (seen.add(n)) {
+                        eps.add(newEpisode("$shortPlayId|$n") {
+                            episode = n
+                            name = "الحلقة $n"
+                        })
+                    }
+                }
+            } else if (totalFromRsc != null && totalFromRsc > 0) {
+                for (n in 1..totalFromRsc) {
                     if (seen.add(n)) {
                         eps.add(newEpisode("$shortPlayId|$n") {
                             episode = n
@@ -302,7 +355,10 @@ class NetShortProvider : MainAPI() {
                 }
             }
             if (eps.isEmpty()) return null
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {}
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+                this.posterUrl = poster
+                this.plot = plot
+            }
         } catch (e: Exception) {
             null
         }
