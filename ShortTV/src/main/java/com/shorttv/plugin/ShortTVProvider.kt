@@ -190,19 +190,32 @@ class ShortTVProvider : MainAPI() {
             val showId = showIdFromPath(path) ?: return null
             // صفحة الحلقة الأولى تحوي بيانات المسلسل كاملة في __NUXT_DATA__
             val res = app.get("$mainUrl/ar/episode/$showId-1", referer = mainUrl).text
-            val nuxt = extractNuxtData(res) ?: return null
-            val show = parseShowFromNuxt(nuxt) ?: return null
-            if (show.episodeList.isEmpty()) return null
-
-            val eps = show.episodeList.map { ep ->
-                newEpisode(dataForEpisode(show.shortPlayId, ep.episodeNum)) {
+            val nuxt = extractNuxtData(res)
+            val show = nuxt?.let { parseShowFromNuxt(it) }
+            // قد يكون shortPlayId في NUXT_DATA مشفّراً؛ نعتمد على showId من الـ URL
+            val effectiveShortPlayId = show?.shortPlayId?.takeIf { it.all(Char::isDigit) } ?: showId
+            val episodes = show?.episodeList ?: emptyList()
+            val title = show?.title?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) } ?: "ShortTV #$showId"
+            val plot = show?.description
+            val poster = show?.poster
+            if (episodes.isEmpty()) {
+                // نُرجع عنصر واحد على الأقل — التشغيل سيُحاول الجلب من صفحة الحلقة
+                return newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(
+                    newEpisode("$showId|1") { episode = 1; name = "الحلقة 1" }
+                )) {
+                    this.posterUrl = poster
+                    this.plot = plot
+                }
+            }
+            val eps = episodes.map { ep ->
+                newEpisode("$effectiveShortPlayId|${ep.episodeNum}") {
                     episode = ep.episodeNum
                     name = if (ep.isFree) "الحلقة ${ep.episodeNum}" else "🔒 الحلقة ${ep.episodeNum}"
                 }
             }
-            newTvSeriesLoadResponse(show.title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
-                this.posterUrl = show.poster
-                this.plot = show.description
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
+                this.posterUrl = poster
+                this.plot = plot
             }
         } catch (e: Exception) {
             null

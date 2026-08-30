@@ -211,14 +211,20 @@ class ReelShortProvider : MainAPI() {
             }
         }
 
-        // حالة 2: لا توجد VTT، لكن توجد حلقات /Snapshots/ — رجّع كفيلم مع رابط الإعلان/المعاينة
+        // حالة 2: لا توجد VTT، لكن توجد حلقات /Snapshots/ — رجّع كسلسلة بكل الحلقات
+        // (التشغيل سيُظهر الإعلان/المعاينة فقط — لا توجد روابط m3u8 لكل حلقة)
         if (episodes.isNotEmpty()) {
             val trailer = extractTrailerM3u8(res)
-            val data0 = if (trailer != null) "trailer|$trailer" else ""
-            val ep = newEpisode(data0) { episode = 1; name = "معاينة" }
-            return newMovieLoadResponse(title, url, TvType.Movie, ep) {
+            val eps = episodes.map { e ->
+                val data0 = if (trailer != null) "trailer|$trailer" else ""
+                newEpisode(data0) {
+                    episode = e.serialNumber
+                    name = "الحلقة ${e.serialNumber} (إعلان)"
+                }
+            }
+            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 this.posterUrl = cover
-                this.plot = (plot?.let { "$it • " } ?: "") + "إعلان/معاينة فقط"
+                this.plot = (plot?.let { "$it • " } ?: "") + "إعلان/معاينة فقط — روابط التشغيل الكاملة غير متاحة"
             }
         }
 

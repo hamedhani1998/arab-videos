@@ -139,6 +139,32 @@ class FlexTVProvider : MainAPI() {
                     })
                 }
             }
+            // احتياطي: لو الرابط مختصر (لا يحوي عنوان) ولم نجد حلقات، جرّب الصفحة الرئيسية
+            if (eps.isEmpty() && urlTitle.isNullOrBlank()) {
+                try {
+                    val home = app.get("$mainUrl/ar", referer = mainUrl).text
+                    for (m in episodePathRegex.findAll(home)) {
+                        val p = m.groupValues[1]
+                        val pParsed = parsePath(p) ?: continue
+                        if (pParsed.second != seriesId) continue
+                        // وجدنا المسار الكامل — أعد تحميل الصفحة منه
+                        val fullUrl = "$mainUrl/ar/episodes/$p"
+                        val res2 = app.get(fullUrl, referer = mainUrl).text
+                        for (m2 in episodePathRegex.findAll(res2)) {
+                            val p2 = m2.groupValues[1]
+                            val p2Parsed = parsePath(p2) ?: continue
+                            if (p2Parsed.second != seriesId) continue
+                            val pNo = p2.substringBefore("-").removePrefix("episode-").toIntOrNull() ?: continue
+                            if (seenEp.add(pNo)) {
+                                eps.add(newEpisode("$mainUrl/ar/episodes/$p2") {
+                                    episode = pNo; name = "الحلقة $pNo"
+                                })
+                            }
+                        }
+                        if (eps.isNotEmpty()) break
+                    }
+                } catch (_: Exception) {}
+            }
             if (eps.isEmpty()) {
                 eps.add(newEpisode(url) { episode = 1; name = "الحلقة 1" })
             }
