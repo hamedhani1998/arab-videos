@@ -277,7 +277,7 @@
             "hamedhani1998"
         ],
         "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
-        "fileSize": 13835,
+        "fileSize": 19443,
         "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
         "language": "ar",
         "tvTypes": [
@@ -285,7 +285,7 @@
             "Movie"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-fJrCKyZcxfIgPn6eEZROZOFUPimZHx4dEfOcfFY4REA="
+        "fileHash": "sha256-QIl99ueHiZttak6dNni87ni9QxBaqH7yZQaT+lJTlhI="
     },
     {
         "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/StardustTV.cs3",
@@ -317,7 +317,7 @@
             "hamedhani1998"
         ],
         "description": "FlexTV - مسلسلات دراما قصيرة عمودية",
-        "fileSize": 12137,
+        "fileSize": 12905,
         "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
         "language": "ar",
         "tvTypes": [
@@ -325,7 +325,7 @@
             "Movie"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-+2Ky2dFJEqOxS5RMOxeTVyDUUMtNwxIcvA3nmKeR5OI="
+        "fileHash": "sha256-rECqxMpywyRaQC3fnt6H6djzj2Ge3US1koEAOwcJA7w="
     },
     {
         "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NetShort.cs3",
@@ -337,7 +337,7 @@
             "hamedhani1998"
         ],
         "description": "NetShort - مسلسلات دراما قصيرة عمودية",
-        "fileSize": 23571,
+        "fileSize": 23605,
         "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
         "language": "ar",
         "tvTypes": [
@@ -345,7 +345,7 @@
             "Movie"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-1Sc4UaEKiXYCSBKO5/svC+xBU5M6ZgAu2Ri4JQuBVkY="
+        "fileHash": "sha256-y9m3HeB8yuh7eATXIRBLgwoT0pFqHxKdYOmKO+A42N8="
     },
     {
         "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ReelShort.cs3",
@@ -357,7 +357,7 @@
             "hamedhani1998"
         ],
         "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
-        "fileSize": 19732,
+        "fileSize": 20045,
         "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
         "language": "ar",
         "tvTypes": [
@@ -365,7 +365,7 @@
             "Movie"
         ],
         "apiVersion": 1,
-        "fileHash": "sha256-hGw722L8qf0SRIjb/U3FUod3d9FyxSDvj1dN0APmZ3E="
+        "fileHash": "sha256-Q70XFz0kPH2ENoQhHZJxpxHwxTkGg6rCnagMFQZriks="
     },
     {
         "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/Sex6x.cs3",

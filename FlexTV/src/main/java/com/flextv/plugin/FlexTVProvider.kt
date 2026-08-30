@@ -40,17 +40,25 @@ class FlexTVProvider : MainAPI() {
     private fun parseShowList(html: String): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
+        // ابحث عن poster لكلّ عمل (يأتي قبل أول حلقة له عادة)
+        val posterRegex = Regex("""data-src="(https://file-cdn\.flextv\.cc/image/[^"]+)"""")
+        val allPosters = posterRegex.findAll(html).map { it.groupValues[1] }.toList()
+        var posterIdx = 0
         for (m in episodePathRegex.findAll(html)) {
             val path = m.groupValues[1]
             val parsed = parsePath(path) ?: continue
             val (title, seriesId) = parsed
             if (seen.add(seriesId)) {
+                val poster = allPosters.getOrNull(posterIdx)
+                posterIdx++
                 results.add(
                     newTvSeriesSearchResponse(
                         title,
                         "$mainUrl/ar/episodes/episode-1-$seriesId",
                         TvType.TvSeries
-                    )
+                    ) {
+                        this.posterUrl = poster
+                    }
                 )
             }
         }
@@ -99,7 +107,8 @@ class FlexTVProvider : MainAPI() {
                 if (pParsed.second != seriesId) continue // حلقات نفس العمل فقط
                 val pNo = p.substringBefore("-").removePrefix("episode-").toIntOrNull() ?: continue
                 if (seenEp.add(pNo)) {
-                    eps.add(newEpisode("$mainUrl/ar/episodes/episode-$pNo-$seriesId") {
+                    // نخزن المسار الكامل (يحوي العنوان) كي لا يعطي 404
+                    eps.add(newEpisode("$mainUrl/ar/episodes/$p") {
                         episode = pNo; name = "الحلقة $pNo"
                     })
                 }
@@ -107,7 +116,10 @@ class FlexTVProvider : MainAPI() {
             if (eps.isEmpty()) {
                 eps.add(newEpisode(url) { episode = 1; name = "الحلقة 1" })
             }
+            val posterUrl = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
+                this.posterUrl = posterUrl
                 plot = Regex("""<meta name="description" content="([^"]+)""").find(res)?.groupValues?.get(1)
             }
         } catch (e: Exception) {

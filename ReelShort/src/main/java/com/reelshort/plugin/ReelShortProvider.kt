@@ -173,10 +173,13 @@ class ReelShortProvider : MainAPI() {
 
         val firstVideoPic = episodes.firstOrNull()?.videoPic
         val vtt = isVttFamily(firstVideoPic)
-        val vod = isVodFamily(firstVideoPic)
+        // نستبعد الكتب التي كلها نمط /Snapshots/ (لا توجد روابط تشغيل)
+        val playable = episodes.filter { e -> isVttFamily(e.videoPic) }
+        if (playable.isEmpty()) return null
+        val effectiveEpisodes = if (vtt) playable else episodes
 
-        val eps = episodes.map { e ->
-            val data0 = if (vtt) {
+        val eps = effectiveEpisodes.map { e ->
+            val data0 = if (isVttFamily(e.videoPic)) {
                 "${e.chapterId ?: ""}|${e.videoPic ?: ""}"
             } else {
                 "${e.chapterId ?: ""}|"
@@ -218,39 +221,43 @@ class ReelShortProvider : MainAPI() {
         if (parts.size < 2) return false
         val chapterId = parts[0]
         val videoPic = parts[1]
-        if (videoPic.isBlank() || !isVttFamily(videoPic)) return false
-        val master = vttMasterUrl(videoPic) ?: return false
-        try {
-            val masterText = app.get(master, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
-            callback(newExtractorLink(name, "ReelShort 1080p", master, ExtractorLinkType.M3U8) {
-                referer = mainUrl
-                quality = getQualityFromName("1080p")
-            })
-            for (lang in langNames.keys) {
-                val subUrl = master.replaceAfterLast("/", "subtitle/$lang.m3u8")
-                callback(newExtractorLink(
-                    source = name,
-                    name = "ReelShort $lang",
-                    url = subUrl,
-                    type = ExtractorLinkType.M3U8,
-                ) {
+        // 1) المسار الرئيسي: عائلة VTT (يمكن استخراج كل الحلقات)
+        if (videoPic.isNotBlank() && isVttFamily(videoPic)) {
+            val master = vttMasterUrl(videoPic) ?: return false
+            return try {
+                val masterText = app.get(master, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+                callback(newExtractorLink(name, "ReelShort 1080p", master, ExtractorLinkType.M3U8) {
                     referer = mainUrl
+                    quality = getQualityFromName("1080p")
                 })
-            }
-            val subRegex = Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES[^>]*NAME="([^"]+)"[^>]*URI="([^"]+)"""")
-            for (m in subRegex.findAll(masterText)) {
-                val lang = m.groupValues[1]
-                val uri = m.groupValues[2]
-                val subUrl = if (uri.startsWith("http")) uri else master.replaceAfterLast("/", uri)
-                val cleanLang = when (lang) {
-                    "Arabic", "MSA" -> "ar"
-                    else -> lang.lowercase().take(2)
+                for (lang in langNames.keys) {
+                    val subUrl = master.replaceAfterLast("/", "subtitle/$lang.m3u8")
+                    callback(newExtractorLink(
+                        source = name,
+                        name = "ReelShort $lang",
+                        url = subUrl,
+                        type = ExtractorLinkType.M3U8,
+                    ) {
+                        referer = mainUrl
+                    })
                 }
-                try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
+                val subRegex = Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES[^>]*NAME="([^"]+)"[^>]*URI="([^"]+)"""")
+                for (m in subRegex.findAll(masterText)) {
+                    val lang = m.groupValues[1]
+                    val uri = m.groupValues[2]
+                    val subUrl = if (uri.startsWith("http")) uri else master.replaceAfterLast("/", uri)
+                    val cleanLang = when (lang) {
+                        "Arabic", "MSA" -> "ar"
+                        else -> lang.lowercase().take(2)
+                    }
+                    try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
+                }
+                true
+            } catch (e: Exception) {
+                false
             }
-            return true
-        } catch (e: Exception) {
-            return false
         }
+        // 2) المسار البديل: محتوى قديم بنمط /Snapshots/ (نُمرّر الإعلان/المعاينة فقط)
+        return false
     }
 }

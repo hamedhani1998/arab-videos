@@ -48,9 +48,12 @@ private fun encryptRequestAes(json: String): String {
     return Base64.getEncoder().encodeToString(cipher.doFinal(json.toByteArray(Charsets.UTF_8)))
 }
 
-private fun decryptResponseAes(b64Cipher: String, b64AesKey: String): String {
+private fun decryptResponseAes(b64Cipher: String, respAesKeyBase64: String): String {
+    // respAesKeyBase64 is the RSA-decrypted response: it's the server's per-request AES key,
+    // delivered as a base64 string. Decode once to get the 32 raw bytes.
+    val rawKey = Base64.getDecoder().decode(respAesKeyBase64)
     val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
-    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(Base64.getDecoder().decode(b64AesKey), "AES"))
+    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, "AES"))
     return String(cipher.doFinal(Base64.getDecoder().decode(b64Cipher)), Charsets.UTF_8)
 }
 
