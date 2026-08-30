@@ -67,11 +67,12 @@ class ShortTVProvider : MainAPI() {
         return try { mapper.readTree(m.groupValues[1]) } catch (e: Exception) { null }
     }
 
-    // حلّ مرجع __NUXT_DATA__: مرجع رقمي يقفز إلى entry آخر، أو null
+    // حلّ مرجع __NUXT_DATA__: مرجع رقمي يقفز إلى entry آخر، أو القيمة المباشرة
+    // ملاحظة: الرقم الذي يساوي أو يتجاوز حجم المصفوفة هو قيمة مباشرة وليس مرجعاً
     private fun resolveRef(data: JsonNode, idx: Int, maxHops: Int = 6): JsonNode? {
-        var cur: JsonNode? = data.get(idx)
+        var cur: JsonNode? = data.get(idx) ?: return null
         var hops = 0
-        while (cur != null && cur.isNumber && hops < maxHops) {
+        while (cur != null && cur.isNumber && cur.asInt() < data.size() && hops < maxHops) {
             cur = data.get(cur.asInt())
             hops++
         }
@@ -177,8 +178,17 @@ class ShortTVProvider : MainAPI() {
         }
     }
 
-    // البحث على ShortTV يعمل من جهة العميل فقط (لا API خارجي)، لذا نُعيد قائمة فارغة.
-    override suspend fun search(query: String): List<SearchResponse>? = emptyList()
+    // البحث على ShortTV: نرشّح من قائمة الصفحة الرئيسية
+    override suspend fun search(query: String): List<SearchResponse>? {
+        return try {
+            val res = app.get("$mainUrl/ar", referer = mainUrl).text
+            val all = parseShowList(res)
+            val q = query.trim().lowercase()
+            all.filter { it.name.lowercase().contains(q) }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
 
     // data المخزّن: "{shortPlayId}|{episodeNum}"
     private fun dataForEpisode(shortPlayId: String, ep: Int): String = "$shortPlayId|$ep"
@@ -195,9 +205,19 @@ class ShortTVProvider : MainAPI() {
             // قد يكون shortPlayId في NUXT_DATA مشفّراً؛ نعتمد على showId من الـ URL
             val effectiveShortPlayId = show?.shortPlayId?.takeIf { it.all(Char::isDigit) } ?: showId
             val episodes = show?.episodeList ?: emptyList()
-            val title = show?.title?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) } ?: "ShortTV #$showId"
+            // العنوان: من NUXT_DATA__ أولاً، ثم og:title من HTML، ثم h1
+            val nuxtTitle = show?.title?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) }
+            val ogTitle = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)?.trim()
+                ?.replace(Regex("""\s*-\s*ShortMax\s*$"""), "")?.trim()
+            val h1 = Regex("""<h1[^>]*>([^<]+)</h1>""").find(res)?.groupValues?.get(1)?.trim()
+            val title = nuxtTitle ?: ogTitle ?: h1 ?: "ShortTV #$showId"
             val plot = show?.description
-            val poster = show?.poster
+            // الملصق: من NUXT_DATA__ أولاً، ثم og:image من HTML
+            val nuxtPoster = show?.poster
+            val ogImage = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)
+            val poster = nuxtPoster ?: ogImage
             if (episodes.isEmpty()) {
                 // نُرجع عنصر واحد على الأقل — التشغيل سيُحاول الجلب من صفحة الحلقة
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, listOf(

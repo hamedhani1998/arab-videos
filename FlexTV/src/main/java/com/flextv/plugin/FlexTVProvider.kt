@@ -128,10 +128,15 @@ class FlexTVProvider : MainAPI() {
             val eps = mutableListOf<Episode>()
             val seenEp = mutableSetOf<Int>()
             for (m in episodePathRegex.findAll(res)) {
-                val p = m.groupValues[1]
+                val p = m.groupValues[1].substringBefore("#") // إزالة الـ fragment
                 val pParsed = parsePath(p) ?: continue
                 if (pParsed.second != seriesId) continue // حلقات نفس العمل فقط
-                val pNo = p.substringBefore("-").removePrefix("episode-").toIntOrNull() ?: continue
+                // الصيغة: episode-{N}-{title}-{seriesId} → الرقم هو الجزء الثاني
+                val pParts = p.split("-")
+                val pNo = if (pParts.size >= 3 && pParts[0] == "episode") {
+                    pParts[1].toIntOrNull()
+                } else null
+                if (pNo == null || pNo < 1) continue
                 if (seenEp.add(pNo)) {
                     // نخزن المسار الكامل (يحوي العنوان) كي لا يعطي 404
                     eps.add(newEpisode("$mainUrl/ar/episodes/$p") {
@@ -151,10 +156,12 @@ class FlexTVProvider : MainAPI() {
                         val fullUrl = "$mainUrl/ar/episodes/$p"
                         val res2 = app.get(fullUrl, referer = mainUrl).text
                         for (m2 in episodePathRegex.findAll(res2)) {
-                            val p2 = m2.groupValues[1]
+                            val p2 = m2.groupValues[1].substringBefore("#")
                             val p2Parsed = parsePath(p2) ?: continue
                             if (p2Parsed.second != seriesId) continue
-                            val pNo = p2.substringBefore("-").removePrefix("episode-").toIntOrNull() ?: continue
+                            val p2Parts = p2.split("-")
+                            val pNo = if (p2Parts.size >= 3 && p2Parts[0] == "episode") p2Parts[1].toIntOrNull() else null
+                            if (pNo == null || pNo < 1) continue
                             if (seenEp.add(pNo)) {
                                 eps.add(newEpisode("$mainUrl/ar/episodes/$p2") {
                                     episode = pNo; name = "الحلقة $pNo"

@@ -142,16 +142,19 @@ class NetShortProvider : MainAPI() {
         "ar" to "أحدث الدراما",
     )
 
-    private val cardRegex = Regex(
-        """<a\s+href="(/ar/episodes/[^"]+)"\s+class="video_item[^"]*"[^>]*>"""
-    )
-    // في صفحة NetShort الفعلية لا توجد عناصر video_item في HTML (تُحمَّل من JavaScript).
-    // نستخرج البيانات من self.__next_f.push( ... ) كائنات تحوي shortPlayNameUrl/shortPlayCover
-    private val nextDataNameUrl = Regex("""\"shortPlayNameUrl\"\s*:\s*\"(/ar/episode/[^\"]+)\"""")
-    private val nextDataFullUrl = Regex("""\"fullEpisodeNameUrl\"\s*:\s*\"(/ar/full-episodes/[^\"]+)\"""")
-    private val nextDataName = Regex("""\"shortPlayName\"\s*:\s*\"([^\"]+)\"""")
-    private val nextDataCover = Regex("""\"shortPlayCover\"\s*:\s*\"(https?://[^\"]+)\"""")
-    private val nextDataEpisodes = Regex("""\"totalEpisode\"\s*:\s*(\d+)""")
+    // صفحة NetShort لا تحوي روابط في HTML الثابت — تُحمَّل من RSC.
+    // الصيغة الصحيحة هي /ar/episode/ (مفرد)
+    private val cardRegex = Regex("""<a\s+href="(/ar/episode/[^"]+)""")
+    // احتياطي: استخرج روابط الحلقات من HTML مباشرة
+    private val htmlEpLinkRegex = Regex("""href="(/ar/episode/[^"?#]+)""")
+    private val htmlEpTitleRegex = Regex("""title="([^"]+)"""")
+    // نستخرج البيانات من حمولة RSC (self.__next_f.push) — الاقتباسات مهرّبة (\")
+    // نطابق حتى علامة الاقتباس المهرّبة التالية (\")، مع السماح بأي محارف بينها
+    private val nextDataNameUrl = Regex("""\\"shortPlayNameUrl\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
+    private val nextDataFullUrl = Regex("""\\"fullEpisodeNameUrl\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
+    private val nextDataName = Regex("""\\"shortPlayName\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
+    private val nextDataCover = Regex("""\\"shortPlayCover\\"\s*:\s*\\"((?:[^"\\\\]|\\\\.)*)\\"""")
+    private val nextDataEpisodes = Regex("""\\"totalEpisode\\"\s*:\s*(\d+)""")
     private val titleInCardRegex = Regex("""title="([^"]+)"""")
     private val posterInCardRegex = Regex("""class="poster[^"]*"\s+src="([^"]+)"""")
 
@@ -174,7 +177,7 @@ class NetShortProvider : MainAPI() {
         for (m in cardRegex.findAll(html)) {
             val raw = m.groupValues[1]
             val decoded = decodeTitle(raw)
-            val path = decoded.removePrefix("/ar/episodes/").substringBefore("?")
+            val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
             val parts = path.split("-")
             if (parts.size < 3) continue
             val showId = parts.last()
@@ -190,7 +193,28 @@ class NetShortProvider : MainAPI() {
                 })
             }
         }
-        // ثانياً: ابحث في دفعات RSC (Next.js streaming payload)
+        // ثانياً: احتياطي — ابحث في HTML الحيّ عن روابط /ar/episode/...
+        if (results.isEmpty()) {
+            val htmlLinks = htmlEpLinkRegex.findAll(html).map { it.groupValues[1] }.toList()
+            val htmlTitles = htmlEpTitleRegex.findAll(html).map { it.groupValues[1] }.toList()
+            var tIdx = 0
+            for (raw in htmlLinks) {
+                val decoded = decodeTitle(raw)
+                val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
+                val parts = path.split("-")
+                if (parts.size < 2) continue
+                val showId = parts.last()
+                if (!showId.all { it.isDigit() }) continue
+                val url = "$mainUrl$raw"
+                if (seen.add(url)) {
+                    val title = htmlTitles.getOrNull(tIdx++)?.takeIf { it.isNotBlank() }
+                        ?: parts.dropLast(1).joinToString("-").replace(Regex("""^\d+-"""), "")
+                            .takeIf { it.isNotBlank() } ?: path
+                    results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries))
+                }
+            }
+        }
+        // ثالثاً: ابحث في دفعات RSC (Next.js streaming payload)
         if (results.isEmpty()) {
             val names = nextDataName.findAll(html).map { it.groupValues[1] }.toList()
             val urls = nextDataNameUrl.findAll(html).map { it.groupValues[1] }.toList()
@@ -220,7 +244,7 @@ class NetShortProvider : MainAPI() {
     private fun parseCard(html: String, m: MatchResult): SearchResponse? {
         val raw = m.groupValues[1]
         val decoded = decodeTitle(raw)
-        val path = decoded.removePrefix("/ar/episodes/").substringBefore("?")
+        val path = decoded.removePrefix("/ar/episode/").substringBefore("?")
         val parts = path.split("-")
         if (parts.size < 3) return null
         val showId = parts.last()
@@ -282,15 +306,15 @@ class NetShortProvider : MainAPI() {
         return last.takeIf { it.all(Char::isDigit) && it.length >= 10 }
     }
 
-    private val epRefRegex = Regex("""<a\s+href="(/ar/episodes/[^"]+)"\s+class="video_item[^"]*"""")
-    // أنماط إضافية من حمولة RSC لصفحة الحلقة
-    private val rscInitialEpRegex = Regex("""\"initialCurrentEpisodeInfo\"\\?":\\?\{[^}]*?\"episodeNo\"\\?":\\?(\d+)""")
-    private val rscTotalEpRegex = Regex("""\"totalEpisode\"\\?":\\?(\d+)""")
+    private val epRefRegex = Regex("""<a\s+href="(/ar/episode/[^"]+)"\s+class="video_item[^"]*"""")
+    // أنماط إضافية من حمولة RSC لصفحة الحلقة (اقتباسات مهرّبة)
+    private val rscInitialEpRegex = Regex("""\\"initialCurrentEpisodeInfo\\"\s*:\s*\{[^}]*?\\"episodeNo\\"\s*:\s*(\d+)""")
+    private val rscTotalEpRegex = Regex("""\\"totalEpisode\\"\s*:\s*(\d+)""")
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val res = app.get(url, referer = mainUrl).text
-            val path = url.substringAfter("/ar/episodes/").substringBefore("?")
+            val path = url.substringAfter("/ar/episode/").substringBefore("?")
             val shortPlayId = extractShortPlayIdFromPath(path) ?: return null
             val title = run {
                 val h1 = Regex("""<h1[^>]*>([^<]+)</h1>""").find(res)?.groupValues?.get(1)?.trim()
@@ -342,7 +366,7 @@ class NetShortProvider : MainAPI() {
             } else {
                 var n = 1
                 for (ep in epLinks) {
-                    val epPath = decodeTitle(ep).removePrefix("/ar/episodes/").substringBefore("?")
+                    val epPath = decodeTitle(ep).removePrefix("/ar/episode/").substringBefore("?")
                     val epParts = epPath.split("-")
                     val num = epParts.lastOrNull()?.toIntOrNull() ?: continue
                     if (seen.add(num)) {

@@ -129,29 +129,63 @@ class ReelShortProvider : MainAPI() {
             this.posterUrl = b.cover
         }
 
+    // احتياطي: استخرج قائمة المسلسلات من روابط /ar/episodes/... في HTML
+    private val rsEpisodeLinkRegex = Regex("""/ar/episodes/([^"'\\]+)""")
+    private fun parseBooksFromHtml(html: String): List<SearchResponse> {
+        val seen = HashSet<String>()
+        val results = mutableListOf<SearchResponse>()
+        for (m in rsEpisodeLinkRegex.findAll(html)) {
+            val path = m.groupValues[1].substringBefore("?").substringBefore("#")
+            // الصيغة: episode-{N}-{title}-{bookId}-{random}
+            val parts = path.split("-")
+            if (parts.size < 4) continue
+            val bookId = parts[3]
+            if (!bookId.all { it.isLetterOrDigit() }) continue
+            if (!seen.add(bookId)) continue
+            val title = parts.drop(3).dropLast(1).joinToString("-")
+                .replace(Regex("""^\d+-"""), "").trim()
+                .ifBlank { bookId }
+            val bookUrl = "$mainUrl/ar/movie/$bookId"
+            results.add(newTvSeriesSearchResponse(title, bookUrl, TvType.TvSeries))
+        }
+        return results
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val path = when (request.data) {
             "ar" -> "/ar"
             else -> "/${request.data}"
         }
-        val root = loadNextData(path) ?: return null
-        val fallback = root.get("props")?.get("pageProps")?.get("fallback")
-        val webInfo: JsonNode? = if (fallback != null) {
-            val fields = fallback.fieldNames()
-            var found: JsonNode? = null
-            while (fields.hasNext()) {
-                val name = fields.next()
-                if (name.contains("webInfo")) { found = fallback.get(name); break }
-            }
-            found
-        } else null
-        val shelves = webInfo?.get("bookShelfList")
-        if (shelves == null || !shelves.isArray) return null
+        val html = try { app.get("$mainUrl$path", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
+        // محاولة 1: __NEXT_DATA__
+        val root = loadNextData(path)
         val all = mutableListOf<SearchResponse>()
-        val seen = HashSet<String>()
-        for (shelf in shelves) {
-            for (b in parseBooksList(shelf.get("books"))) {
-                if (seen.add(b.id)) all.add(bookToSearch(b))
+        if (root != null) {
+            val fallback = root.get("props")?.get("pageProps")?.get("fallback")
+            val webInfo: JsonNode? = if (fallback != null) {
+                val fields = fallback.fieldNames()
+                var found: JsonNode? = null
+                while (fields.hasNext()) {
+                    val name = fields.next()
+                    if (name.contains("webInfo")) { found = fallback.get(name); break }
+                }
+                found
+            } else null
+            val shelves = webInfo?.get("bookShelfList")
+            if (shelves != null && shelves.isArray) {
+                val seen = HashSet<String>()
+                for (shelf in shelves) {
+                    for (b in parseBooksList(shelf.get("books"))) {
+                        if (seen.add(b.id)) all.add(bookToSearch(b))
+                    }
+                }
+            }
+        }
+        // محاولة 2: استخرج من روابط HTML مباشرة
+        if (all.isEmpty()) {
+            val seen = HashSet<String>()
+            for (item in parseBooksFromHtml(html)) {
+                if (seen.add(item.url)) all.add(item)
             }
         }
         return if (all.isEmpty()) null else newHomePageResponse(request.name, all)
@@ -159,13 +193,35 @@ class ReelShortProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         val q = java.net.URLEncoder.encode(query, "UTF-8")
-        val root = loadNextData("/ar/search?keywords=$q&type=movies") ?: return null
-        val data = root.get("props")?.get("pageProps") ?: return null
-        return parseBooksList(data.get("books")).map { bookToSearch(it) }
+        val searchPath = "/ar/search?keywords=$q&type=movies"
+        val html = try { app.get("$mainUrl$searchPath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
+        // محاولة 1: __NEXT_DATA__
+        val root = loadNextData(searchPath)
+        if (root != null) {
+            val data = root.get("props")?.get("pageProps")
+            if (data != null) {
+                val books = parseBooksList(data.get("books"))
+                if (books.isNotEmpty()) return books.map { bookToSearch(it) }
+            }
+        }
+        // محاولة 2: استخرج من HTML
+        val htmlBooks = parseBooksFromHtml(html)
+        if (htmlBooks.isNotEmpty()) return htmlBooks
+        return emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val bookId = url.substringAfterLast("/").substringBefore("?")
+        // نحاول استخراج bookId من أي صيغة رابط
+        val bookId = when {
+            url.contains("/ar/movie/") -> url.substringAfter("/ar/movie/").substringBefore("?").substringBefore("#")
+            url.contains("/ar/episodes/") -> {
+                // الصيغة: /ar/episodes/episode-{N}-{title}-{bookId}-{random}
+                val path = url.substringAfter("/ar/episodes/").substringBefore("?").substringBefore("#")
+                val parts = path.split("-")
+                if (parts.size >= 4) parts[3] else return null
+            }
+            else -> url.substringAfterLast("/").substringBefore("?")
+        }
         val res = try {
             app.get("$mainUrl/ar/movie/$bookId", headers = mapOf("User-Agent" to UA), referer = mainUrl).text
         } catch (e: Exception) { "" }
