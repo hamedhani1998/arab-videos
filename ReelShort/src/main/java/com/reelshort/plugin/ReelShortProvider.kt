@@ -115,8 +115,15 @@ class ReelShortProvider : MainAPI() {
         extractNextData(app.get("$mainUrl$path", headers = mapOf("User-Agent" to UA), referer = mainUrl).text)
     } catch (e: Exception) { null }
 
+    // بناء رابط المسلسل بالشكل الجديد /ar/movie/{slug}-{id} — الموقع أصبح يرفض الرابط بدون slug (301)
+    private fun moviePath(title: String, id: String): String {
+        val slug = java.net.URLEncoder.encode(title.trim().replace(" ", "-"), "UTF-8")
+            .replace("+", "%20")
+        return "/ar/movie/$slug-$id"
+    }
+
     private fun bookToSearch(b: Book): SearchResponse =
-        newTvSeriesSearchResponse(b.title, "$mainUrl/ar/movie/${b.id}", TvType.TvSeries) {
+        newTvSeriesSearchResponse(b.title, "$mainUrl${moviePath(b.title, b.id)}", TvType.TvSeries) {
             this.posterUrl = b.cover
         }
 
@@ -214,19 +221,24 @@ class ReelShortProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val bookId = when {
-            url.contains("/ar/movie/") -> url.substringAfter("/ar/movie/").substringBefore("?").substringBefore("#")
-            url.contains("/ar/episodes/") -> {
-                val path = url.substringAfter("/ar/episodes/").substringBefore("?").substringBefore("#")
-                val parts = path.split("-")
-                if (parts.size >= 4) parts[3] else return null
+        // المسار الكامل بعد /ar/movie/ - قد يكون مجرد id أو {slug}-{id}
+        val rawPath = url.substringAfter("/ar/movie/").substringBefore("?").substringBefore("#")
+        val pathSegs = rawPath.split("-")
+        val bookId = pathSegs.lastOrNull()?.takeIf { it.all(Char::isLetterOrDigit) && it.length >= 8 }
+            ?: when {
+                url.contains("/ar/episodes/") -> {
+                    val path = url.substringAfter("/ar/episodes/").substringBefore("?").substringBefore("#")
+                    val parts = path.split("-")
+                    if (parts.size >= 4) parts[3] else return null
+                }
+                else -> url.substringAfterLast("/").substringBefore("?")
             }
-            else -> url.substringAfterLast("/").substringBefore("?")
-        }
+        // استخدم المسار الموجود في الرابط مباشرة (يتضمن slug — الموقع يرفض الرابط بدون slug)
+        val moviePath = if (rawPath.isNotBlank()) rawPath else bookId
         val res = try {
-            app.get("$mainUrl/ar/movie/$bookId", headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+            app.get("$mainUrl/ar/movie/$moviePath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text
         } catch (e: Exception) { "" }
-        val root = loadNextData("/ar/movie/$bookId") ?: return null
+        val root = loadNextData("/ar/movie/$moviePath") ?: return null
         val data = root.get("props")?.get("pageProps")?.get("data") ?: return null
         val title = textOrNull(data, "book_title") ?: return null
         val cover = textOrNull(data, "book_pic")

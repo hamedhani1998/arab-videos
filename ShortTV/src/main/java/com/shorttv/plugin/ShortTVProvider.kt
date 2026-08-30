@@ -46,10 +46,37 @@ class ShortTVProvider : MainAPI() {
     }
 
     // تحليل قائمة العروض من صفحة ShortTV الرئيسية
+    // الواجهة أصبحت تُصيّر البطاقات في HTML مباشرة (drama-card) بدلاً من NUXT_DATA__
     private fun parseShowList(html: String): List<SearchResponse> {
-        val data = extractNuxtData(html) ?: return emptyList()
         val results = mutableListOf<SearchResponse>()
         val seen = mutableSetOf<String>()
+        // كل بطاقة: <div class="drama-card"> ... <a href="/ar/episode/{slug}-{id}-1" class="card-image"><img alt="..." ...>
+        //   + <a href="/ar/drama/{slug}-{id}" class="card-title-layout"><p class="card-title">NAME</p>
+        val cardRe = Regex("""<div class="drama-card"[\s\S]*?</div>""")
+        val epHrefRe = Regex("""href="(/ar/episode/[^"]+)"""")
+        val dramaHrefRe = Regex("""href="(/ar/drama/[^"]+)"""")
+        val posterRe = Regex("""<img[^>]*?(?:data-src|src)="(https://akamai-static[^"]+)"""")
+        val titleRe = Regex("""<p class="card-title"[^>]*>([^<]+)</p>""")
+        for (m in cardRe.findAll(html)) {
+            val block = m.value
+            val epHref = epHrefRe.find(block)?.groupValues?.get(1) ?: continue
+            val dramaHref = dramaHrefRe.find(block)?.groupValues?.get(1) ?: continue
+            // id من رابط الحلقة: /ar/episode/{slug}-{id}-1 → آخر رقمين
+            val epClean = epHref.substringBefore("?").substringBefore("#")
+            val epSegs = epClean.split("-")
+            val id = epSegs.takeLast(2).firstOrNull()?.takeIf { it.all(Char::isDigit) } ?: continue
+            if (id.length < 3 || !seen.add(id)) continue
+            val title = titleRe.find(block)?.groupValues?.get(1)?.trim()
+                ?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) } ?: continue
+            val poster = posterRe.find(block)?.groupValues?.get(1)
+            val url = "$mainUrl$dramaHref"
+            results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                this.posterUrl = poster
+            })
+        }
+        if (results.isNotEmpty()) return results
+        // احتياطي: NUXT_DATA القديمة (إن وُجدت)
+        val data = extractNuxtData(html) ?: return emptyList()
         for (i in 0 until data.size()) {
             val e = data.get(i) ?: continue
             if (!e.isObject) continue
@@ -60,8 +87,7 @@ class ShortTVProvider : MainAPI() {
             val title = titleNode?.asText()?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) } ?: continue
             val posterNode = resolveRef(data, e.get("coverUrl")?.asInt() ?: -1)
             val poster = posterNode?.asText()
-            val url = "$mainUrl/ar/drama/$playId"
-            results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+            results.add(newTvSeriesSearchResponse(title, "$mainUrl/ar/drama/$playId", TvType.TvSeries) {
                 this.posterUrl = poster
             })
         }
