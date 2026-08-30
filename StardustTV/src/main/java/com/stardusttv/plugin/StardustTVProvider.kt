@@ -1,7 +1,12 @@
 package com.stardusttv.plugin
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+
+private val mapper = ObjectMapper().registerKotlinModule()
 
 class StardustTVProvider : MainAPI() {
     override var name = "StardustTV"
@@ -14,44 +19,155 @@ class StardustTVProvider : MainAPI() {
         "ar" to "أحدث الدراما",
     )
 
-    // روابط الـ m3u8 مضمّنة مباشرة في  HTML
-    // النمط 1: v.stardust-tv.com/{lang}/{series}_{AR_DUB|AR}/h264/{ep}_{hash}.m3u8
-    // النمط 2: v.stardust-tv.com/prod/{seriesId}/{ep}/{hash}.m3u8
-    private val m3u8Regex = Regex("""https://v\.stardust-tv\.com/[^"\\]+\.m3u8""")
+    // ---- إشارات تحليل HTML ----
+    // بطاقة العمل في الصفحة الرئيسية: <a class="video_item ..." href="/ar/episodes/01-العنوان-31554" title="العنوان">
+    //   ... <img class="poster ..." src="https://assets.stardusttv.cc/uploadfile/...">
+    private val cardStartRegex = Regex(
+        """<a\s+class="video_item[^"]*"[^>]*href="(/ar/episodes/[^"]+)"[^>]*>"""
+    )
+    private val titleInBlockRegex = Regex("""title="([^"]*)"""")
+    private val posterInBlockRegex = Regex("""class="poster[^"]*"[^>]*src="([^"]+)"""")
 
-    private data class ParsedShow(
-        val title: String,
-        val cover: String?,
-        val dubType: String, // "AR_DUB" (مدبلج) أو "AR" (مترجم)
-        val episodes: List<String>,
+    // بيانات Nuxt المضمّنة في كل صفحة (قائمة الحلقات كاملة مع روابط الـ m3u8 للحلقات المجانية)
+    private val nuxtRegex = Regex(
+        """<script type="application/json" id="__NUXT_DATA__"[^>]*>([\s\S]*?)</script>"""
     )
 
-    private fun parseShows(html: String): List<ParsedShow> {
-        val shows = mutableMapOf<String, MutableList<String>>()
-        val covers = mutableMapOf<String, String>()
-        for (m in m3u8Regex.findAll(html)) {
-            val url = m.value
-            val file = url.substringAfterLast("/").removeSuffix(".m3u8")
-            val langAndSeries = url.removePrefix("https://v.stardust-tv.com/").substringBefore("/h264/")
-            val dubType = if (langAndSeries.endsWith("_AR_DUB")) "AR_DUB"
-                else if (langAndSeries.endsWith("_AR")) "AR" else "ORIGINAL"
-            val seriesName = langAndSeries
-                .removeSuffix("_AR_DUB").removeSuffix("_AR")
-                .replace("-", " ").trim()
-            shows.getOrPut(seriesName) { mutableListOf() }.add(url)
+    private data class Card(val title: String, val url: String, val poster: String?)
+
+    private data class ShowData(
+        val title: String,
+        val plot: String?,
+        val poster: String?,
+        // (رقم الحلقة, رابط m3u8)
+        val episodes: List<Pair<Int, String>>,
+    )
+
+    // يعيد العنوان العربي من مسار الرابط مثل (01-سيد-البورصة-21582) → سيد البورصة
+    private fun titleFromPath(path: String): String? {
+        var p = try {
+            java.net.URLDecoder.decode(path.replace("+", "%2B"), "UTF-8")
+        } catch (e: Exception) {
+            path
         }
-        // ملاحظة: الغلاف غير متاح بسهولة من رابط الـ m3u8؛ نتركه null
-        return shows.map { (title, eps) ->
-            ParsedShow(title, null, "AR_DUB", eps)
+        p = p.replace(Regex("""^\d+-"""), "").replace(Regex("""-\d+$"""), "")
+        val t = p.replace("-", " ").trim()
+        return t.takeIf { it.isNotBlank() }
+    }
+
+    private fun parseCards(html: String): List<Card> {
+        val cards = mutableListOf<Card>()
+        val seen = mutableSetOf<String>()
+        for (m in cardStartRegex.findAll(html)) {
+            val href = m.groupValues[1]
+            if (!seen.add(href)) continue
+            val end = html.indexOf("</a>", m.range.last)
+            if (end < 0) continue
+            val block = html.substring(m.range.last, end)
+            val title = titleInBlockRegex.find(block)?.groupValues?.get(1)?.trim()
+                ?.takeIf { it.isNotBlank() } ?: continue
+            val poster = posterInBlockRegex.find(block)?.groupValues?.get(1)
+                ?.substringBefore("?")
+            cards.add(Card(title, "$mainUrl$href", poster))
         }
+        return cards
+    }
+
+    // فكّ ضغط بيانات Nuxt 3: قيمة أي حقل كعدد (أو سلسلة رقمية) هي فهرس
+    // في نفس مصفوفة الـ JSON الكبيرة، فيجب تحويل الفهرس إلى القيمة الفعلية.
+    private class Nuxt(private val root: JsonNode) {
+        // في بيانات Nuxt 3، قيمة الحقل كعدد صحيح هي فهرس مباشر في مصفوفة الـ JSON
+        // (مرجع لمرة واحدة فقط — root[idx] هو القيمة النهائية وليس مرجعاً آخر).
+        fun deref(node: JsonNode?): JsonNode? {
+            if (node == null) return node
+            return when {
+                node.isNumber -> {
+                    val idx = node.asInt()
+                    if (idx in 0 until root.size()) root[idx] else node
+                }
+                node.isTextual -> {
+                    val idx = node.asText().toIntOrNull()
+                    if (idx != null && idx in 0 until root.size()) {
+                        val r = root[idx]
+                        if (!r.isContainerNode) r else node
+                    } else node
+                }
+                else -> node
+            }
+        }
+
+        fun text(node: JsonNode?): String? = deref(node)?.takeIf { it.isTextual }?.asText()
+        fun int(node: JsonNode?): Int? =
+            deref(node)?.takeIf { it.isNumber }?.asInt()
+    }
+
+    private fun parseNuxtDetail(html: String, showId: Int): ShowData? {
+        val nuxtMatch = nuxtRegex.find(html) ?: return null
+        val root = try {
+            mapper.readTree(nuxtMatch.groupValues[1])
+        } catch (e: Exception) {
+            return null
+        } ?: return null
+        if (!root.isArray) return null
+        val nuxt = Nuxt(root)
+
+        var showTitle: String? = null
+        var showPlot: String? = null
+        var showPoster: String? = null
+        val eps = mutableListOf<Pair<Int, String>>()
+        val seenEps = HashSet<Int>()
+
+        fun visit(node: JsonNode, depth: Int) {
+            if (depth > 16) return
+            when {
+                node.isArray -> for (c in node) visit(c, depth + 1)
+                node.isObject -> {
+                    // كائن العمل (يحتوي episode_total + cover_path)
+                    if (node.has("episode_total") && node.has("cover_path")) {
+                        val id = nuxt.int(node.get("id"))
+                        if (id != null && id == showId) {
+                            showTitle = nuxt.text(node.get("english_name"))
+                                ?: nuxt.text(node.get("name"))
+                            showPlot = nuxt.text(node.get("intro"))
+                            showPoster = nuxt.text(node.get("cover_path"))
+                        }
+                    }
+                    // كائن الحلقة (يحتوي filepath + vid)
+                    if (node.has("filepath") && node.has("vid")) {
+                        val vid = nuxt.int(node.get("vid"))
+                        if (vid != null && vid == showId) {
+                            val fp = nuxt.text(node.get("filepath"))
+                            if (fp != null && fp.startsWith("http") && fp.contains(".m3u8")) {
+                                val sort = nuxt.int(node.get("sort"))
+                                if (sort != null && sort > 0 && seenEps.add(sort)) {
+                                    eps.add(sort to fp)
+                                }
+                            }
+                        }
+                    }
+                    val it = node.fields()
+                    while (it.hasNext()) visit(it.next().value, depth + 1)
+                }
+            }
+        }
+        visit(root, 0)
+
+        if (eps.isEmpty()) return null
+        return ShowData(
+            title = showTitle ?: "",
+            plot = showPlot,
+            poster = showPoster,
+            episodes = eps.sortedBy { it.first },
+        )
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val res = app.get("$mainUrl/${request.data}", referer = mainUrl).text
-            val shows = parseShows(res)
-            val items = shows.map { show ->
-                newTvSeriesSearchResponse(show.title, "$mainUrl/video/index", TvType.TvSeries)
+            val items = parseCards(res).map { card ->
+                newTvSeriesSearchResponse(card.title, card.url, TvType.TvSeries) {
+                    this.posterUrl = card.poster
+                }
             }
             if (items.isEmpty()) null else newHomePageResponse(request.name, items)
         } catch (e: Exception) {
@@ -61,9 +177,17 @@ class StardustTVProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val res = app.get("$mainUrl/ar/search?q=$q", referer = mainUrl).text
-            parseShows(res).map { newTvSeriesSearchResponse(it.title, "$mainUrl/video/index", TvType.TvSeries) }
+            val q = query.trim()
+            if (q.isEmpty()) return emptyList()
+            // لا توجد صفحة بحث على الموقع (SSR لا يوفرها)؛ نبحث في قائمة الصفحة الرئيسية.
+            val res = app.get("$mainUrl/ar", referer = mainUrl).text
+            parseCards(res)
+                .filter { it.title.contains(q, ignoreCase = true) }
+                .map { card ->
+                    newTvSeriesSearchResponse(card.title, card.url, TvType.TvSeries) {
+                        this.posterUrl = card.poster
+                    }
+                }
         } catch (e: Exception) {
             null
         }
@@ -71,19 +195,29 @@ class StardustTVProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val res = app.get("$mainUrl/ar", referer = mainUrl).text
-            val shows = parseShows(res)
-            // نعرض كل الأعمال مع حلقاتها (كل حلقة = فيديو قصير)
-            // نبني قائمة حلقات شاملة من كل الـ m3u8 المتاحة
-            val eps = mutableListOf<Episode>()
-            var idx = 1
-            for (show in shows) {
-                for (epUrl in show.episodes) {
-                    eps.add(newEpisode(epUrl) { episode = idx; name = "${show.title} - الحلقة ${idx}" })
-                    idx++
+            val res = app.get(url, referer = mainUrl).text
+
+            val rawPath = url.substringAfter("/ar/episodes/", url)
+            val showId = rawPath.substringAfterLast("-").toIntOrNull() ?: return null
+            val data = parseNuxtDetail(res, showId) ?: return null
+
+            val title = data.title.ifBlank {
+                Regex("""<title>([^<]+)</title>""").find(res)?.groupValues?.get(1)?.trim()
+                    ?: titleFromPath(rawPath)
+                    ?: "StardustTV"
+            }
+
+            val eps = data.episodes.map { (num, fp) ->
+                newEpisode(fp) {
+                    episode = num
+                    name = "الحلقة $num" + if (fp.contains("_AR_DUB")) " (مدبلج)" else ""
                 }
             }
-            newTvSeriesLoadResponse("StardustTV", url, TvType.TvSeries, eps) {}
+
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+                this.posterUrl = data.poster
+                plot = data.plot
+            }
         } catch (e: Exception) {
             null
         }
@@ -96,11 +230,11 @@ class StardustTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            // data هنا هو رابط الـ m3u8 مباشرة
             val m3u8 = data
             callback(
-                newExtractorLink(name, "StardustTV", m3u8, ExtractorLinkType.M3U8) {
-                    referer = mainUrl; quality = getQualityFromName("720p")
+                newExtractorLink(name, "StardustTV 720p", m3u8, ExtractorLinkType.M3U8) {
+                    referer = mainUrl
+                    quality = getQualityFromName("720p")
                 }
             )
             true

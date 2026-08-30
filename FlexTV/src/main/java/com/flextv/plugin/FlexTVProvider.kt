@@ -15,21 +15,39 @@ class FlexTVProvider : MainAPI() {
     )
 
     // رابط صفقة الحلقة: /ar/episodes/episode-{no}-{name}-{seriesId}
-    private val episodeLinkRegex = Regex("""/ar/episodes/episode-\d+-([^"'\\]+)""")
-    private val seriesIdRegex = Regex("""/ar/episodes/episode-\d+-.+-([A-Za-z0-9_-]+)""")
+    private val episodePathRegex = Regex("""/ar/episodes/([^"'\\]+)""")
 
     // الماستر بلاي ليست مضمّن في صفحة الحلقة
     private val masterRegex = Regex("""https://resources-sgp-auth\.flextv\.cc/wz/m3u8/[^"\\]+/abr\.m3u8\?auth_key=[^"\\]+""")
 
+    // يفكّ اسم العمل (عربي) ومعرّف المسلسل من مسار الحلقة
+    private fun parsePath(path: String): Pair<String, String>? {
+        if (!path.startsWith("episode-")) return null
+        val parts = path.split("-")
+        if (parts.size < 3) return null
+        val seriesId = parts.last()
+        if (!seriesId.all { it.isLetterOrDigit() || it == '_' }) return null
+        val encTitle = parts.drop(2).dropLast(1).joinToString("-")
+        if (encTitle.isBlank()) return null
+        val title = try {
+            java.net.URLDecoder.decode(encTitle.replace("+", "%2B"), "UTF-8")
+        } catch (e: Exception) {
+            encTitle
+        }
+        return title.trim() to seriesId
+    }
+
     private fun parseShowList(html: String): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
-        for (m in seriesIdRegex.findAll(html)) {
-            val seriesId = m.groupValues[1]
+        for (m in episodePathRegex.findAll(html)) {
+            val path = m.groupValues[1]
+            val parsed = parsePath(path) ?: continue
+            val (title, seriesId) = parsed
             if (seen.add(seriesId)) {
                 results.add(
                     newTvSeriesSearchResponse(
-                        seriesId.replace("-", " ").trim(),
+                        title,
                         "$mainUrl/ar/episodes/episode-1-$seriesId",
                         TvType.TvSeries
                     )
@@ -62,25 +80,34 @@ class FlexTVProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val res = app.get(url, referer = mainUrl).text
-            val seriesId = seriesIdRegex.find(url)?.groupValues?.get(1)
-                ?: Regex("""/ar/episodes/[^"'\\]+""").find(url)?.value
+
+            // استخراج seriesId من الـ URL
+            val pathFromUrl = url.substringAfter("/ar/episodes/")
+            val parsed = parsePath(pathFromUrl)
+            val seriesId = parsed?.second
                 ?: return null
+            val urlTitle = parsed?.first ?: "FlexTV"
 
             val title = Regex("""<h[12][^>]*>([^<]+)</h[12]>""").find(res)?.groupValues?.get(1)?.trim()
-                ?: seriesId.replace("-", " ").trim()
+                ?.takeIf { it.isNotBlank() } ?: urlTitle
 
             val eps = mutableListOf<Episode>()
-            val epNumbers = Regex("""/ar/episodes/episode-(\d+)-""").findAll(res).mapNotNull { it.groupValues[1].toIntOrNull() }.toSortedSet()
-            if (epNumbers.isEmpty()) {
-                eps.add(newEpisode(url) { episode = 1; name = "الحلقة 1" })
-            } else {
-                for (n in epNumbers) {
-                    eps.add(newEpisode("$mainUrl/ar/episodes/episode-$n-$seriesId") {
-                        episode = n; name = "الحلقة $n"
+            val seenEp = mutableSetOf<Int>()
+            for (m in episodePathRegex.findAll(res)) {
+                val p = m.groupValues[1]
+                val pParsed = parsePath(p) ?: continue
+                if (pParsed.second != seriesId) continue // حلقات نفس العمل فقط
+                val pNo = p.substringBefore("-").removePrefix("episode-").toIntOrNull() ?: continue
+                if (seenEp.add(pNo)) {
+                    eps.add(newEpisode("$mainUrl/ar/episodes/episode-$pNo-$seriesId") {
+                        episode = pNo; name = "الحلقة $pNo"
                     })
                 }
             }
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+            if (eps.isEmpty()) {
+                eps.add(newEpisode(url) { episode = 1; name = "الحلقة 1" })
+            }
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
                 plot = Regex("""<meta name="description" content="([^"]+)""").find(res)?.groupValues?.get(1)
             }
         } catch (e: Exception) {

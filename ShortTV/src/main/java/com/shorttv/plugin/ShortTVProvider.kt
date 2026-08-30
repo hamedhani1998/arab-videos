@@ -24,17 +24,32 @@ class ShortTVProvider : MainAPI() {
     private val episodeLinkRegex = Regex("""/ar/episode/([^"'\\]+)""")
 
     // صفحة الحلقة تضم روابط الجودات مباشرة
-    private val video1080Regex = Regex("""video_1080\\*"\s*:\s*"(https?://[^"\\]+)""")
-    private val video720Regex = Regex("""video_720\\*"\s*:\s*"(https?://[^"\\]+)""")
-    private val video480Regex = Regex("""video_480\\*"\s*:\s*"(https?://[^"\\]+)""")
+    // تنسيق JSON مضمّن في سكربت: video_1080\":\"URL  (كلتا علامتي الاقتباس يسبقها \)
+    private val video1080Regex = Regex("""video_1080\\*"\s*:\s*\\*"(https?://[^"\\]+)""")
+    private val video720Regex = Regex("""video_720\\*"\s*:\s*\\*"(https?://[^"\\]+)""")
+    private val video480Regex = Regex("""video_480\\*"\s*:\s*\\*"(https?://[^"\\]+)""")
 
     private fun unescape(s: String): String =
         s.replace("\\/", "/").replace("\\u0026", "&")
 
+    // فكّ ترميز الاسم (ارجع إلى عربي) وتنظيفه
+    private fun cleanName(encoded: String): String {
+        var name = try {
+            java.net.URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8")
+        } catch (e: Exception) {
+            encoded
+        }
+        name = name.replace("---", " ").replace("-", " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+        // إزالة وسم "مدبلج" في أول/آخر الاسم
+        name = name.removePrefix("مدبلج").removeSuffix("مدبلج").trim()
+        return name
+    }
+
     private fun parseShowList(html: String): List<SearchResponse> {
-        val shows = linkedSetOf<String>()
         val results = mutableListOf<SearchResponse>()
-        val seen = mutableSetOf<String>()
+        val seenKey = mutableSetOf<String>()
         for (m in episodeLinkRegex.findAll(html)) {
             val path = m.groupValues[1]
             // path = {name}-{showId}-{ep}
@@ -42,11 +57,12 @@ class ShortTVProvider : MainAPI() {
             if (parts.size < 3) continue
             val ep = parts.last()
             val showId = parts[parts.size - 2]
-            val showName = parts.dropLast(2).joinToString("-")
-            if (seen.add(showName)) {
+            if (!ep.all { it.isDigit() } || !showId.all { it.isDigit() }) continue
+            val showNameEnc = parts.dropLast(2).joinToString("-")
+            if (seenKey.add(showId)) {
                 results.add(
                     newTvSeriesSearchResponse(
-                        showName.replace("-", " ").trim(),
+                        cleanName(showNameEnc),
                         "$mainUrl/ar/episode/$path",
                         TvType.TvSeries
                     )
@@ -79,23 +95,35 @@ class ShortTVProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val res = app.get(url, referer = mainUrl).text
-            val title = Regex("""<title>([^<]+)</title>""").find(res)?.groupValues?.get(1)?.trim()
-                ?: Regex("""/ar/episode/([^-\d]+)""").find(url)?.groupValues?.get(1)?.replace("-", " ")
-                ?: return null
+            val path = url.substringAfter("/ar/episode/")
+            val parts = path.split("-")
+            val currentShowId = if (parts.size >= 3) parts[parts.size - 2] else null
+
+            // الاسم من الـ URL (أفضل من <title> الذي قد يحوي ضجيجاً)
+            val encodedName = if (parts.size >= 3) parts.dropLast(2).joinToString("-") else ""
+            val title = cleanName(encodedName)
+                .ifBlank { Regex("""<title>([^<]+)</title>""").find(res)?.groupValues?.get(1)?.trim() ?: "ShortTV" }
 
             val eps = mutableListOf<Episode>()
-            val epLinks = episodeLinkRegex.findAll(res).map { it.groupValues[1] }.toSet()
-            for (path in epLinks) {
-                val parts = path.split("-")
-                if (parts.size < 3) continue
-                val epNum = parts.last().toIntOrNull() ?: continue
-                eps.add(
-                    newEpisode("/ar/episode/$path") {
-                        episode = epNum
-                        name = "الحلقة $epNum"
-                    }
-                )
+            val seenEp = mutableSetOf<Int>()
+            for (m in episodeLinkRegex.findAll(res)) {
+                val p = m.groupValues[1]
+                val pParts = p.split("-")
+                if (pParts.size < 3) continue
+                val pEp = pParts.last().toIntOrNull() ?: continue
+                val pShowId = pParts[pParts.size - 2]
+                // نعرض حلقات نفس العمل فقط
+                if (currentShowId != null && pShowId != currentShowId) continue
+                if (seenEp.add(pEp)) {
+                    eps.add(
+                        newEpisode("/ar/episode/$p") {
+                            episode = pEp
+                            name = "الحلقة $pEp"
+                        }
+                    )
+                }
             }
+            if (eps.isEmpty()) return null
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
                 plot = Regex("""<meta name="description" content="([^"]+)""").find(res)?.groupValues?.get(1)
             }
