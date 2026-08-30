@@ -227,10 +227,14 @@ class ShortTVProvider : MainAPI() {
                     this.plot = plot
                 }
             }
-            val eps = episodes.map { ep ->
+            // نُرتب الحلقات حسب episodeNum ونمنح كل منها رقم تسلسلي (1..N)
+            // لأن episodeNum هو معرّف الحلقة وليس رقمها الحقيقي
+            val sortedEps = episodes.sortedBy { it.episodeNum }
+            val eps = sortedEps.mapIndexed { index, ep ->
+                val serialNo = index + 1
                 newEpisode("$effectiveShortPlayId|${ep.episodeNum}") {
-                    episode = ep.episodeNum
-                    name = if (ep.isFree) "الحلقة ${ep.episodeNum}" else "🔒 الحلقة ${ep.episodeNum}"
+                    episode = serialNo
+                    name = if (ep.isFree) "الحلقة $serialNo" else "🔒 الحلقة $serialNo"
                 }
             }
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {

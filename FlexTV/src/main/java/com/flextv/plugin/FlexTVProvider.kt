@@ -15,7 +15,8 @@ class FlexTVProvider : MainAPI() {
     )
 
     // رابط صفقة الحلقة: /ar/episodes/episode-{no}-{name}-{seriesId}
-    private val episodePathRegex = Regex("""/ar/episodes/([^"'\\]+)""")
+    // قد يتبعه ?playTime=1 أو #episode/#video — ن remove them
+    private val episodePathRegex = Regex("""/ar/episodes/([^"'\?#\s]+)""")
 
     // الماستر بلاي ليست مضمّن في صفحة الحلقة
     private val masterRegex = Regex("""https://resources-sgp-auth\.flextv\.cc/wz/m3u8/[^"\\]+/abr\.m3u8\?auth_key=[^"\\]+""")
@@ -88,11 +89,13 @@ class FlexTVProvider : MainAPI() {
         }
     }
 
+    // بحث الموقع يُرجع "لا دائماً" — نرشّح من الصفحة الرئيسية بدل ذلك
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val res = app.get("$mainUrl/ar/search?q=$q", referer = mainUrl).text
-            parseShowList(res)
+            val res = app.get("$mainUrl/ar", referer = mainUrl).text
+            val all = parseShowList(res)
+            val q = query.trim().lowercase()
+            if (q.isBlank()) all else all.filter { it.name.lowercase().contains(q) }
         } catch (e: Exception) {
             null
         }

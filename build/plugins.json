@@ -277,7 +277,7 @@
       "hamedhani1998"
     ],
     "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 22444,
+    "fileSize": 23033,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": [
@@ -285,7 +285,7 @@
       "Movie"
     ],
     "apiVersion": 1,
-    "fileHash": "sha256-r6rNACDCTsVsVIE/cEcphbCkWPARH8NjAaKYnU6YC8E="
+    "fileHash": "sha256-mWa30KoAsVMxpqIdg3bZLYmP3GS5bxSEC1K/WMfO7TY="
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/StardustTV.cs3",
@@ -317,7 +317,7 @@
       "hamedhani1998"
     ],
     "description": "FlexTV - مسلسلات دراما قصيرة عمودية",
-    "fileSize": 16310,
+    "fileSize": 16761,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": [
@@ -325,7 +325,7 @@
       "Movie"
     ],
     "apiVersion": 1,
-    "fileHash": "sha256-ADNi6IjhZUsBecJ6kLZIM/MGHgvZiA/x8iM0OarIfoQ="
+    "fileHash": "sha256-irpizU4JDT0aX66HeFETNEzSe5zzvxpR3eyAlQsF+3A="
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NetShort.cs3",
