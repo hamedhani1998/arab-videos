@@ -49,6 +49,38 @@ class ShortTVProvider : MainAPI() {
         return name
     }
 
+    // استخراج __NUXT_DATA__ من صفحة ShortTV
+    private fun extractNuxtData(html: String): JsonNode? {
+        val regex = Regex("""<script[^>]*id="__NUXT_DATA__"[^>]*>([\s\S]*?)</script>""")
+        val match = regex.find(html) ?: return null
+        return try {
+            mapper.readTree(match.groupValues[1])
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // تحليل قائمة العروض من صفحة ShortTV الرئيسية
+    private fun parseShowList(html: String): List<SearchResponse> {
+        val data = extractNuxtData(html) ?: return emptyList()
+        val results = mutableListOf<SearchResponse>()
+        for (i in 0 until data.size()) {
+            val e = data.get(i) ?: continue
+            if (!e.isObject) continue
+            if (!e.has("shortPlayId")) continue
+            val playId = resolveRef(data, e.get("shortPlayId").asInt())?.asText() ?: continue
+            val titleNode = resolveRef(data, e.get("lanShortPlayName")?.asInt() ?: -1)
+            val title = titleNode?.asText()?.takeIf { it.isNotBlank() } ?: continue
+            val posterNode = resolveRef(data, e.get("lanCoverId")?.asInt() ?: -1)
+            val poster = posterNode?.asText()
+            val url = "$mainUrl/ar/drama/$playId"
+            results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                this.posterUrl = poster
+            })
+        }
+        return results
+    }
+
     // من مسار /ar/drama/{slug}-{showId} أو /ar/episode/{slug}-{showId}-{ep} نستخرج showId
     // المسار قد يكون URL-encoded وقد يحتوي على كلمات مثل "مدبلج" ملتصقة بالكلمة الأخيرة
     private fun showIdFromPath(rawPath: String): String? {
