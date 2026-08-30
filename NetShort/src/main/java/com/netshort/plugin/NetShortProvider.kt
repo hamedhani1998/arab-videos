@@ -128,11 +128,11 @@ private fun fetchEpisode(playId: String, ep: Int): EpisodeResult? {
     return EpisodeResult(pv, lock, subs)
 }
 
-// تنظيف رابط الصورة - حذف معاملات الحجم
+// تنظيف رابط الصورة - إزالة أي query string فقط
+// ملاحظة: لاحقة ~tplv-... إلزامية ليخدمها CDN (بدونها يعيد 400)، لذلك نحتفظ بها
 private fun cleanCoverUrl(url: String?): String? {
     if (url.isNullOrBlank()) return null
-    // حذف كل شي بعد ~ (مثل ~tplv-vod-rs:651:868.webp)
-    val cleaned = url.substringBefore("~").substringBefore("?")
+    val cleaned = url.substringBefore("?")
     return cleaned.ifBlank { null }
 }
 
