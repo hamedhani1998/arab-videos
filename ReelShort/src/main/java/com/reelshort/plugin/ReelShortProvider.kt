@@ -46,14 +46,23 @@ class ReelShortProvider : MainAPI() {
         return videoPic!!.replaceAfterLast("/", "h264/h264.m3u8")
     }
 
-    private fun isVodFamily(videoPic: String?): Boolean =
-        videoPic != null && videoPic.contains("/Snapshots/")
-
-    // استخراج رابط الإعلان/المعاينة (m3u8) من contentUrl في JSON-LD schema.org
     private fun extractTrailerM3u8(html: String): String? {
         val regex = Regex("""\"contentUrl\"\s*:\s*\"(https://[^\"]+\.m3u8[^\"]*)\"""")
         return regex.find(html)?.groupValues?.get(1)
     }
+
+    private data class Book(
+        val id: String,
+        val title: String,
+        val cover: String?,
+        val lang: String?,
+        val chapterCount: Int?,
+    )
+
+    private data class Episode(
+        val serialNumber: Int,
+        val videoPic: String?,
+    )
 
     private fun parseBooksList(node: JsonNode?): List<Book> {
         if (node == null) return emptyList()
@@ -74,21 +83,6 @@ class ReelShortProvider : MainAPI() {
         return out
     }
 
-    private data class Book(
-        val id: String,
-        val title: String,
-        val cover: String?,
-        val lang: String?,
-        val chapterCount: Int?,
-    )
-
-    private data class Episode(
-        val serialNumber: Int,
-        val chapterId: String?,
-        val videoPic: String?,
-        val duration: Int?,
-    )
-
     private fun parseEpisodes(node: JsonNode?): List<Episode> {
         if (node == null) return emptyList()
         val ob = node.get("online_base")
@@ -103,11 +97,8 @@ class ReelShortProvider : MainAPI() {
             val sn = snNode.asInt()
             if (sn < 1) continue
             if (!seen.add(sn)) continue
-            val chapterId = textOrNull(e, "chapter_id")
             val videoPic = textOrNull(e, "video_pic")
-            val durNode = e.get("duration")
-            val duration = if (durNode != null && durNode.isNumber) durNode.asInt() else null
-            out.add(Episode(sn, chapterId, videoPic, duration))
+            out.add(Episode(sn, videoPic))
         }
         return out.sortedBy { it.serialNumber }
     }
@@ -129,24 +120,17 @@ class ReelShortProvider : MainAPI() {
             this.posterUrl = b.cover
         }
 
-    // احتياطي: استخرج قائمة المسلسلات من روابط /ar/episodes/... في HTML
-    private val rsEpisodeLinkRegex = Regex("""/ar/episodes/([^"'\\]+)""")
+    // استخراج الكتب من HTML مباشرة
     private fun parseBooksFromHtml(html: String): List<SearchResponse> {
         val seen = HashSet<String>()
         val results = mutableListOf<SearchResponse>()
-        for (m in rsEpisodeLinkRegex.findAll(html)) {
-            val path = m.groupValues[1].substringBefore("?").substringBefore("#")
-            // الصيغة: episode-{N}-{title}-{bookId}-{random}
-            val parts = path.split("-")
-            if (parts.size < 4) continue
-            val bookId = parts[3]
+        val regex = Regex("""/ar/movie/([^"'\\]+)""")
+        for (m in regex.findAll(html)) {
+            val bookId = m.groupValues[1].substringBefore("?").substringBefore("#")
             if (!bookId.all { it.isLetterOrDigit() }) continue
             if (!seen.add(bookId)) continue
-            val title = parts.drop(3).dropLast(1).joinToString("-")
-                .replace(Regex("""^\d+-"""), "").trim()
-                .ifBlank { bookId }
             val bookUrl = "$mainUrl/ar/movie/$bookId"
-            results.add(newTvSeriesSearchResponse(title, bookUrl, TvType.TvSeries))
+            results.add(newTvSeriesSearchResponse(bookId, bookUrl, TvType.TvSeries))
         }
         return results
     }
@@ -157,37 +141,48 @@ class ReelShortProvider : MainAPI() {
             else -> "/${request.data}"
         }
         val html = try { app.get("$mainUrl$path", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
-        // محاولة 1: __NEXT_DATA__
-        val root = loadNextData(path)
+
         val all = mutableListOf<SearchResponse>()
+
+        // محاولة 1: __NEXT_DATA__ - البحث عن books في كل الـ fallback
+        val root = loadNextData(path)
         if (root != null) {
             val fallback = root.get("props")?.get("pageProps")?.get("fallback")
-            val webInfo: JsonNode? = if (fallback != null) {
-                val fields = fallback.fieldNames()
-                var found: JsonNode? = null
-                while (fields.hasNext()) {
-                    val name = fields.next()
-                    if (name.contains("webInfo")) { found = fallback.get(name); break }
-                }
-                found
-            } else null
-            val shelves = webInfo?.get("bookShelfList")
-            if (shelves != null && shelves.isArray) {
-                val seen = HashSet<String>()
-                for (shelf in shelves) {
-                    for (b in parseBooksList(shelf.get("books"))) {
-                        if (seen.add(b.id)) all.add(bookToSearch(b))
+            if (fallback != null) {
+                // البحث في كل المفاتيح
+                for (key in fallback.fieldNames()) {
+                    val valNode = fallback.get(key)
+                    val books = parseBooksList(valNode)
+                    if (books.isNotEmpty()) {
+                        val seen = HashSet<String>()
+                        for (b in books) {
+                            if (seen.add(b.id)) all.add(bookToSearch(b))
+                        }
+                        if (all.isNotEmpty()) break
+                    }
+                    // بحث في bookShelfList
+                    val shelves = valNode?.get("bookShelfList")
+                    if (shelves != null && shelves.isArray) {
+                        val seen = HashSet<String>()
+                        for (shelf in shelves) {
+                            for (b in parseBooksList(shelf)) {
+                                if (seen.add(b.id)) all.add(bookToSearch(b))
+                            }
+                        }
+                        if (all.isNotEmpty()) break
                     }
                 }
             }
         }
-        // محاولة 2: استخرج من روابط HTML مباشرة
+
+        // محاولة 2: HTML
         if (all.isEmpty()) {
             val seen = HashSet<String>()
             for (item in parseBooksFromHtml(html)) {
                 if (seen.add(item.url)) all.add(item)
             }
         }
+
         return if (all.isEmpty()) null else newHomePageResponse(request.name, all)
     }
 
@@ -195,27 +190,33 @@ class ReelShortProvider : MainAPI() {
         val q = java.net.URLEncoder.encode(query, "UTF-8")
         val searchPath = "/ar/search?keywords=$q&type=movies"
         val html = try { app.get("$mainUrl$searchPath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
+
         // محاولة 1: __NEXT_DATA__
         val root = loadNextData(searchPath)
         if (root != null) {
             val data = root.get("props")?.get("pageProps")
             if (data != null) {
                 val books = parseBooksList(data.get("books"))
-                if (books.isNotEmpty()) return books.map { bookToSearch(it) }
+                if (books.isNotEmpty()) {
+                    val searchLower = query.trim().lowercase()
+                    return books.filter { it.title.lowercase().contains(searchLower) }.map { bookToSearch(it) }
+                }
             }
         }
-        // محاولة 2: استخرج من HTML
+
+        // محاولة 2: HTML
         val htmlBooks = parseBooksFromHtml(html)
-        if (htmlBooks.isNotEmpty()) return htmlBooks
+        if (htmlBooks.isNotEmpty()) {
+            val searchLower = query.trim().lowercase()
+            return htmlBooks.filter { it.name.lowercase().contains(searchLower) }
+        }
         return emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // نحاول استخراج bookId من أي صيغة رابط
         val bookId = when {
             url.contains("/ar/movie/") -> url.substringAfter("/ar/movie/").substringBefore("?").substringBefore("#")
             url.contains("/ar/episodes/") -> {
-                // الصيغة: /ar/episodes/episode-{N}-{title}-{bookId}-{random}
                 val path = url.substringAfter("/ar/episodes/").substringBefore("?").substringBefore("#")
                 val parts = path.split("-")
                 if (parts.size >= 4) parts[3] else return null
@@ -251,11 +252,10 @@ class ReelShortProvider : MainAPI() {
             }
         }.ifBlank { null }
 
-        // حالة 1: توجد حلقات قابلة للتشغيل (VTT) — رجّع سلسلة
-        val playable = episodes.filter { isVttFamily(it.videoPic) }
-        if (playable.isNotEmpty()) {
-            val eps = playable.map { e ->
-                // نمرر video_pic مباشرة لاستخراج master m3u8 منه
+        // حالة 1: توجد حلقات VTT قابلة للتشغيل
+        val vttEpisodes = episodes.filter { isVttFamily(it.videoPic) }
+        if (vttEpisodes.isNotEmpty()) {
+            val eps = vttEpisodes.map { e ->
                 val data0 = "${e.videoPic ?: ""}||${e.serialNumber}"
                 newEpisode(data0) {
                     episode = e.serialNumber
@@ -268,17 +268,13 @@ class ReelShortProvider : MainAPI() {
             }
         }
 
-        // حالة 2: لا توجد VTT، لكن توجد حلقات /Snapshots/ — رجّع كسلسلة بكل الحلقات
-        // (التشغيل سيُظهر الإعلان/المعاينة فقط — لا توجد روابط m3u8 لكل حلقة)
+        // حالة 2: حلقات بدون VTT - نجرب كل حلقة
         if (episodes.isNotEmpty()) {
-            val trailer = extractTrailerM3u8(res)
             val eps = episodes.map { e ->
-                // نجرب كل حلقة على حدة - بعض الحلقات قد يكون فيها VTT
                 val data0 = "${e.videoPic ?: ""}||${e.serialNumber}"
                 newEpisode(data0) {
                     episode = e.serialNumber
-                    name = if (isVttFamily(e.videoPic)) "الحلقة ${e.serialNumber}"
-                        else "الحلقة ${e.serialNumber} (إعلان)"
+                    name = "الحلقة ${e.serialNumber}"
                 }
             }
             return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
@@ -302,7 +298,6 @@ class ReelShortProvider : MainAPI() {
         val videoPic = parts[0]
         val serialNumber = parts[1]
 
-        // المسار الرئيسي: عائلة VTT (يمكن استخراج master m3u8)
         if (videoPic.isNotBlank() && isVttFamily(videoPic)) {
             val master = vttMasterUrl(videoPic) ?: return false
             return try {
@@ -311,7 +306,6 @@ class ReelShortProvider : MainAPI() {
                     referer = mainUrl
                     quality = getQualityFromName("1080p")
                 })
-                // استخرج الترجمة من master playlist
                 val subRegex = Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES[^>]*NAME="([^"]+)"[^>]*URI="([^"]+)"""")
                 for (m in subRegex.findAll(masterText)) {
                     val lang = m.groupValues[1]
@@ -326,8 +320,6 @@ class ReelShortProvider : MainAPI() {
                 true
             } catch (e: Exception) { false }
         }
-
-        // المسار البديل: محتوى قديم بنمط /Snapshots/ - لا يوجد روابط كاملة
         return false
     }
 }

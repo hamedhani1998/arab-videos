@@ -14,13 +14,9 @@ class FlexTVProvider : MainAPI() {
         "ar" to "أحدث الدراما",
     )
 
-    // رابط صفقة الحلقة: /ar/episodes/episode-{no}-{name}-{seriesId}
     private val episodePathRegex = Regex("""/ar/episodes/([^"'\?#\s]+)""")
-
-    // الماستر بلاي ليست مضمّن في صفحة الحلقة
     private val masterRegex = Regex("""https://resources-sgp-auth\.flextv\.cc/wz/m3u8/[^"\\]+/abr\.m3u8\?auth_key=[^"\\]+""")
 
-    // يفكّ اسم العمل ومعرّف المسلسل من مسار الحلقة
     private fun parsePath(path: String): Pair<String, String>? {
         if (!path.startsWith("episode-")) return null
         val parts = path.split("-")
@@ -35,6 +31,7 @@ class FlexTVProvider : MainAPI() {
         return title to seriesId
     }
 
+    // استخراج الصور من الصفحة الرئيسية
     private fun parseShowList(html: String): List<SearchResponse> {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
@@ -57,7 +54,6 @@ class FlexTVProvider : MainAPI() {
 
             if (seen.add(seriesId)) {
                 val poster = imgs.getOrNull(imgIdx++)
-                // استخرج الاسم من المسار (أوضح من title attribute الطويل)
                 val cardTitle = decodeEpisodeTitle(segments) ?: "FlexTV"
 
                 val cardUrl = "$mainUrl$link"
@@ -100,7 +96,6 @@ class FlexTVProvider : MainAPI() {
     }
 
     private fun decodeEpisodeTitle(segments: List<String>): String? {
-        // الصيغة: episode-{N}-{title-with-dashes}-{seriesId}
         if (segments.size < 4) return null
         val enc = segments.drop(2).dropLast(1).joinToString("-")
         if (enc.isBlank()) return null
@@ -140,7 +135,7 @@ class FlexTVProvider : MainAPI() {
             val seriesId = parsed?.second ?: return null
             val urlTitle = parsed?.first
 
-            // العنوان: من og:title ونظّفه
+            // العنوان من h1 أو og:title ونظّفه
             val ogTitle = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
                 .find(res)?.groupValues?.get(1)?.trim()
             val h1 = Regex("""<h[12][^>]*>([^<]+)</h[12]>""").find(res)?.groupValues?.get(1)?.trim()
@@ -148,7 +143,6 @@ class FlexTVProvider : MainAPI() {
                 ?: ogTitle?.takeIf { it.isNotBlank() }
                 ?: urlTitle?.takeIf { it.isNotBlank() }
                 ?: "FlexTV")
-            // تنظيف "مشاهدة X الحلقة 1 مجاناً HD | FlexTV" -> X
             val title = resolvedTitle
                 .replace(Regex("""^مشاهدة\s+"""), "")
                 .replace(Regex("""\s+الحلقة\s+\d+\s+.*$"""), "")
@@ -157,6 +151,11 @@ class FlexTVProvider : MainAPI() {
                 .trim()
                 .ifBlank { resolvedTitle.trim() }
 
+            // الصورة من og:image
+            val posterUrl = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
+                .find(res)?.groupValues?.get(1)
+
+            // استخراج الحلقات
             val eps = mutableListOf<Episode>()
             val seenEp = mutableSetOf<Int>()
             for (m in episodePathRegex.findAll(res)) {
@@ -172,6 +171,7 @@ class FlexTVProvider : MainAPI() {
                     })
                 }
             }
+
             // احتياطي
             if (eps.isEmpty() && urlTitle.isNullOrBlank()) {
                 try {
@@ -199,11 +199,11 @@ class FlexTVProvider : MainAPI() {
                     }
                 } catch (_: Exception) {}
             }
+
             if (eps.isEmpty()) {
                 eps.add(newEpisode(url) { episode = 1; name = "الحلقة 1" })
             }
-            val posterUrl = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
-                .find(res)?.groupValues?.get(1)
+
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps.sortedBy { it.episode }) {
                 this.posterUrl = posterUrl
                 plot = Regex("""<meta name="description" content="([^"]+)""").find(res)?.groupValues?.get(1)
