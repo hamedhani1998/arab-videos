@@ -511,7 +511,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 27118,
+    "fileSize": 27904,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -521,7 +521,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "NetShort",
     "description": "NetShort - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/NetShort.cs3",
