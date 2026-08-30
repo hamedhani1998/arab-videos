@@ -36,33 +36,53 @@ class FlexTVProvider : MainAPI() {
         val seen = mutableSetOf<String>()
         val results = mutableListOf<SearchResponse>()
 
-        val linkRegex = Regex("""href="(/ar/episodes/episode-[^"]+)""")
-        val imgRegex = Regex("""<img[^>]+data-src="([^"]+)""")
+        // نوع البطاقة الأول: كاروسيل - الصورة داخل <a> بسمة src
+        val carouselRe = Regex("""<a\s+href="(/ar/episodes/episode-[^"]+)"[^>]*title="([^"]*)"[^>]*>(?:(?!</a>).)*?<img[^>]*?\bsrc="(http[^"]+)""")
+        // نوع البطاقة الثاني: شبكة - كل <li class="item ..."> يحوي صورة (data-src أو src)
+        val gridLiRe = Regex("""<li\s+class="item(?:\s+[^"]*)?"[\s\S]*?</li>""")
+        val imgInBlock = Regex("""<img[^>]*?(?:data-src|src)="(http[^"]+)"""")
+        val anchorInBlock = Regex("""<a\s+href="(/ar/episodes/episode-[^"]+)"""")
+        val nameInBlock = Regex("""<meta itemprop="name"\s+content="([^"]+)"""")
 
-        val links = linkRegex.findAll(html).map { it.groupValues[1] }.toList()
-        val imgs = imgRegex.findAll(html).map { it.groupValues[1] }.toList()
+        fun cleanTitle(cardTitle: String): String {
+            var t = cardTitle.trim()
+            t = t.replace(Regex("""^شاهد\s+حلقات\s+"""), "")
+            t = t.replace(Regex("""\s+كاملة\s+أونلاين.*$"""), "")
+            t = t.replace(Regex("""\s*[-–|]\s*FlexTV\s*$"""), "")
+            t = t.replace(Regex("""\s+- بجودة عالية$"""), "")
+            return t.trim()
+        }
 
-        var imgIdx = 0
-
-        for (link in links) {
+        fun processLink(link: String, poster: String?, titleHint: String?): Boolean {
             val cleanLink = link.substringBefore("?").substringBefore("#")
             val segments = cleanLink.split("-")
-            if (segments.size < 3) continue
+            if (segments.size < 3) return false
+            val seriesId = segments.last().takeIf { it.all { c -> c.isLetterOrDigit() } } ?: return false
+            if (seriesId.length < 3 || !seen.add(seriesId)) return false
+            val titleFromMeta = titleHint?.takeIf { it.isNotBlank() }
+            val fallback = decodeEpisodeTitle(segments)
+            val cardTitle = cleanTitle(titleFromMeta ?: fallback ?: "FlexTV")
+            results.add(newTvSeriesSearchResponse(cardTitle, "$mainUrl$link", TvType.TvSeries) {
+                this.posterUrl = poster
+            })
+            return true
+        }
 
-            val seriesId = segments.last().takeIf { it.all { c -> c.isLetterOrDigit() } } ?: continue
-            if (seriesId.length < 3) continue
+        // الكاروسيل
+        for (m in carouselRe.findAll(html)) {
+            val poster = m.groupValues[3]
+            if (poster.isBlank()) continue
+            val titleHint = m.groupValues[2].takeIf { it.isNotBlank() }
+            processLink(m.groupValues[1], poster, titleHint)
+        }
 
-            if (seen.add(seriesId)) {
-                val poster = imgs.getOrNull(imgIdx++)
-                val cardTitle = decodeEpisodeTitle(segments) ?: "FlexTV"
-
-                val cardUrl = "$mainUrl$link"
-                results.add(
-                    newTvSeriesSearchResponse(cardTitle, cardUrl, TvType.TvSeries) {
-                        this.posterUrl = poster
-                    }
-                )
-            }
+        // الشبكة
+        for (m in gridLiRe.findAll(html)) {
+            val block = m.value
+            val link = anchorInBlock.find(block)?.groupValues?.get(1) ?: continue
+            val poster = imgInBlock.find(block)?.groupValues?.get(1)
+            val name = nameInBlock.find(block)?.groupValues?.get(1)
+            processLink(link, poster, name)
         }
 
         // احتياطي

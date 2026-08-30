@@ -56,9 +56,9 @@ class ShortTVProvider : MainAPI() {
             if (!e.has("shortPlayId")) continue
             val playId = resolveRef(data, e.get("shortPlayId").asInt())?.asText() ?: continue
             if (!seen.add(playId)) continue
-            val titleNode = resolveRef(data, e.get("lanShortPlayName")?.asInt() ?: -1)
+            val titleNode = resolveRef(data, e.get("shortPlayName")?.asInt() ?: -1)
             val title = titleNode?.asText()?.takeIf { it.isNotBlank() && !it.all(Char::isDigit) } ?: continue
-            val posterNode = resolveRef(data, e.get("lanCoverId")?.asInt() ?: -1)
+            val posterNode = resolveRef(data, e.get("coverUrl")?.asInt() ?: -1)
             val poster = posterNode?.asText()
             val url = "$mainUrl/ar/drama/$playId"
             results.add(newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
@@ -104,11 +104,11 @@ class ShortTVProvider : MainAPI() {
             if (e == null || e.isNull || !e.isObject) continue
             if (!e.has("shortPlayId") || !e.has("episodeList")) continue
             val playId = resolveRef(data, e.get("shortPlayId").asInt())?.asText() ?: continue
-            val titleNode = resolveRef(data, e.get("lanShortPlayName")?.asInt() ?: -1)
+            val titleNode = resolveRef(data, e.get("shortPlayName")?.asInt() ?: -1)
             val title = titleNode?.asText()?.takeIf { it.isNotBlank() } ?: playId
-            val posterNode = resolveRef(data, e.get("lanCoverId")?.asInt() ?: -1)
+            val posterNode = resolveRef(data, e.get("coverUrl")?.asInt() ?: -1)
             val poster = posterNode?.asText()
-            val descNode = resolveRef(data, e.get("lanShortPlayDescription")?.asInt() ?: -1)
+            val descNode = resolveRef(data, e.get("shortPlayDescription")?.asInt() ?: -1)
             val desc = descNode?.asText()
             val lockNode = resolveRef(data, e.get("lockBegin")?.asInt() ?: -1)
             val lockBegin = lockNode?.asInt() ?: 0

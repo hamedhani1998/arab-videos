@@ -268,10 +268,12 @@ class ReelShortProvider : MainAPI() {
             }
         }
 
-        // حالة 2: حلقات بدون VTT - نجرب كل حلقة
+        // حالة 2: حلقات بدون VTT - نبحث عن رابط تشغيل (المقدمة trailer) في صفحة الفيلم
         if (episodes.isNotEmpty()) {
+            val trailer = extractTrailerM3u8(res)
             val eps = episodes.map { e ->
-                val data0 = "${e.videoPic ?: ""}||${e.serialNumber}"
+                // data: videoPic||serialNumber||trailer — للعروض القديمة نمرر المقدمة كحتوي قابل للتشغيل
+                val data0 = "${e.videoPic ?: ""}||${e.serialNumber}||${trailer ?: ""}"
                 newEpisode(data0) {
                     episode = e.serialNumber
                     name = "الحلقة ${e.serialNumber}"
@@ -292,11 +294,23 @@ class ReelShortProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // data format: "videoPic||serialNumber"
+        // data format: "videoPic||serialNumber" أو "videoPic||serialNumber||trailer"
         val parts = data.split("||")
         if (parts.size < 2) return false
         val videoPic = parts[0]
         val serialNumber = parts[1]
+        val trailer = if (parts.size >= 3) parts[2] else ""
+
+        // حالة العروض القديمة: لا يوجد مقطع قابل للتشغيل لكل حلقة، نعرض المقدمة
+        if (trailer.isNotBlank() && !isVttFamily(videoPic)) {
+            callback(
+                newExtractorLink(name, "ReelShort $serialNumber (مقدمة)", trailer, ExtractorLinkType.M3U8) {
+                    referer = mainUrl
+                    quality = getQualityFromName("1080p")
+                }
+            )
+            return true
+        }
 
         if (videoPic.isNotBlank() && isVttFamily(videoPic)) {
             val master = vttMasterUrl(videoPic) ?: return false
