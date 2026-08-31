@@ -78,6 +78,7 @@ class ReelShortProvider : MainAPI() {
     private data class Episode(
         val serialNumber: Int,
         val videoPic: String?,
+        val chapterId: String?,
     )
 
     private fun parseBooksList(node: JsonNode?): List<Book> {
@@ -114,7 +115,8 @@ class ReelShortProvider : MainAPI() {
             if (sn < 1) continue
             if (!seen.add(sn)) continue
             val videoPic = textOrNull(e, "video_pic")
-            out.add(Episode(sn, videoPic))
+            val chapterId = textOrNull(e, "chapter_id")
+            out.add(Episode(sn, videoPic, chapterId))
         }
         return out.sortedBy { it.serialNumber }
     }
@@ -292,16 +294,17 @@ class ReelShortProvider : MainAPI() {
 
         // حالة 2: حلقات بدون VTT - لكل حلقة صفحة خاصة بها تحمل رابط فيديو الحلقة الفعلية
         if (episodes.isNotEmpty()) {
-            // تجميع روابط صفحات الحلقات من صفحة الفيلم نفسها (كل حلقة لها contentUrl خاص فيها)
-            val epUrlRe = Regex("""/ar/episodes/episode-(\d+)-([^"'\\]+?)-([a-z0-9]{8,})-([a-z0-9]+)""")
-            val epUrlBySerial = HashMap<Int, String>()
-            for (m in epUrlRe.findAll(res)) {
-                val n = m.groupValues[1].toIntOrNull() ?: continue
-                epUrlBySerial[n] = "$mainUrl${m.groupValues[0]}"
-            }
+            // رابط الحلقة: /ar/episodes/episode-{serial}-{slug}-{bookId}-{chapterId}
+            // مهم: نبني العنوان الرابط مشفّرًا (URL-encoded) لأن العناوين العربية الخام في HTML
+            // قد ترفضها بعض عملاء HTTP داخل CloudStream (الرابط المشفّر يعمل دائمًا)
+            val encodedSlug = java.net.URLEncoder.encode(title.trim().replace(" ", "-"), "UTF-8")
+                .replace("+", "%20")
             val trailer = extractTrailerM3u8(res)
             val eps = episodes.map { e ->
-                val epUrl = epUrlBySerial[e.serialNumber] ?: ""
+                val cid = e.chapterId
+                val epUrl = if (!cid.isNullOrBlank() && cid.all { it.isLetterOrDigit() })
+                    "$mainUrl/ar/episodes/episode-${e.serialNumber}-$encodedSlug-$bookId-$cid"
+                else ""
                 // data: 1||episodePageUrl||serialNumber||trailer — للعروض القديمة نجلب فيديو الحلقة من صفحتها
                 val data0 = "1||$epUrl||${e.serialNumber}||${trailer ?: ""}"
                 newEpisode(data0) {

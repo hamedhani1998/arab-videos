@@ -530,7 +530,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 29513,
+    "fileSize": 29524,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -540,7 +540,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 7,
+    "version": 8,
     "internalName": "ReelShort",
     "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/ReelShort.cs3",
