@@ -51,18 +51,27 @@ class OnShortProvider : MainAPI() {
     // الواجهة الرئيسية: صف لكل منصة من المنصات التي يجمعها الموقع،
     // بحيث تظهر مسلسلات كل منصة مضمّنة في قسمها المخصص.
     // المفتاح = اسم المنصة كما يظهر في رابط /ar/platform/{slug}/.
-    // كل المنصات المتوفرة في الموقع (تحقّقت كلها تُرجع بطاقات — أغسطس 2026):
-    // shortmax/netshort/reelshort/dramawave/idrama/goodshort/dramabox/flextv/freereels
+    // كل المنصات المتوفرة في الموقع (الـ 16 slugs كلها تُرجع بطاقات من /ar/platform/{slug}/ —
+    // تحقّقت أغسطس 2026). ملاحظة: حتى لو توفّرت بطاقات منصة، قد لا يُشغّلها مشغّلُ الموقع نفسُه
+    // (يرجع "Provider is not handled by REST bridge" مثل NetShort/StoryReel/DramaBite/VibeShort) —
+    // هذا قيدٌ من جهة السيرفر، وليس خطأً في الإضافة.
     private val platformRows = listOf(
         "shortmax" to "أحدث مسلسلات ShortMax",
         "netshort" to "أحدث مسلسلات NetShort",
         "reelshort" to "أحدث مسلسلات ReelShort",
-        "dramawave" to "أحدث مسلسلات DramaWave",
-        "idrama" to "أحدث مسلسلات iDrama",
-        "goodshort" to "أحدث مسلسلات GoodShort",
         "dramabox" to "أحدث مسلسلات DramaBox",
+        "goodshort" to "أحدث مسلسلات GoodShort",
+        "idrama" to "أحدث مسلسلات iDrama",
+        "dramawave" to "أحدث مسلسلات DramaWave",
         "flextv" to "أحدث مسلسلات FlexTV",
         "freereels" to "أحدث مسلسلات FreeReels",
+        "dramabite" to "أحدث مسلسلات DramaBite",
+        "microdrama" to "أحدث مسلسلات MicroDrama",
+        "moborels" to "أحدث مسلسلات MoBorels",
+        "shortswave" to "أحدث مسلسلات ShortsWave",
+        "stardusttv" to "أحدث مسلسلات StardustTV",
+        "storyreel" to "أحدث مسلسلات StoryReel",
+        "vibeshort-goodbos" to "أحدث مسلسلات VibeShort",
     )
 
     override val mainPage = mainPageOf(
@@ -302,28 +311,19 @@ class OnShortProvider : MainAPI() {
 
             if (node.has("error") || node.get("ok")?.asBoolean(false) == false) return false
 
-            val emitted = java.util.HashSet<String>()
-
+            // الصوت (مهم): HLS الخاص بـ OnShort يستخدم صوتًا مستقلاً (independent audio) —
+            // الفيديو في نسخ منفصلة والصوت في مجموعة #EXT-X-MEDIA:TYPE=AUDIO منفصلة.
+            // لذلك نُسلّم master URL كاملًا للمشغّل فيُحلّ مجموعةَ الصوت تلقائيًا (صوتٌ مُختار
+            // افتراضيًا + قابل للتبديل + جودة متكيّفة). لا نُخرج candidates[] إطلاقًا:
+            // فبعضها (مثل microdrama / reeltv) نسخُ فيديو منفصلة (MP4 بدون مسار صوت) —
+            // تشغيلُها يؤدي إلى صمتٍ تام (لا يوجد صوت). master فقط هو المضمون السليم صوتيًا.
             val main = node.get("url")?.asText()
-            if (!main.isNullOrBlank() && emitted.add(main)) {
-                val q = node.get("quality")?.asText() ?: "540"
-                callback(newExtractorLink(name, "${q}p", main, ExtractorLinkType.M3U8) {
-                    this.quality = getQualityFromName(q)
+            if (!main.isNullOrBlank()) {
+                val q = node.get("quality")?.asText() ?: "auto"
+                callback(newExtractorLink(name, "${q} · Auto", main, ExtractorLinkType.M3U8) {
+                    this.quality = getQualityFromName("1080")
                     this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                 })
-            }
-
-            val candidates = node.get("candidates")
-            if (candidates != null && candidates.isArray) {
-                for (c in candidates) {
-                    val cu = c.get("url")?.asText() ?: continue
-                    if (cu.isBlank() || !emitted.add(cu)) continue
-                    val cq = (c.get("quality")?.asText() ?: "540") + "p"
-                    callback(newExtractorLink(name, cq, cu, ExtractorLinkType.M3U8) {
-                        this.quality = getQualityFromName(cq)
-                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                    })
-                }
             }
 
             val subs = node.get("subtitles")
