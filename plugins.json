@@ -545,5 +545,43 @@
     "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/ReelShort.cs3",
     "name": "ReelShort"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 18880,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "hamedhani1998"
+    ],
+    "tvTypes": [
+      "TvSeries",
+      "Movie"
+    ],
+    "version": 1,
+    "internalName": "OnShort",
+    "description": "OnShort - مسلسلات دراما قصيرة (عربي/إنجليزي)",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/OnShort.cs3",
+    "name": "OnShort"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 16224,
+    "status": 1,
+    "language": "ar",
+    "authors": [
+      "hamedhani1998"
+    ],
+    "tvTypes": [
+      "TvSeries",
+      "Movie"
+    ],
+    "version": 1,
+    "internalName": "DeepDrama",
+    "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/DeepDrama.cs3",
+    "name": "Deep Drama"
   }
 ]
