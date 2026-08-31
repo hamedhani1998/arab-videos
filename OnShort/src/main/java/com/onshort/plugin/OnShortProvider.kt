@@ -72,6 +72,8 @@ class OnShortProvider : MainAPI() {
     // تذكرة جلستنا المؤقتة لكل مسلسل (مفتاح = postId)
     private class PlayCache(val postId: String, val ticket: String)
     @Volatile private var cached: PlayCache? = null
+    // خيط الجلب الخلفي الحالي — حتى ينتظر loadLinks عليه بدلًا من إعادة جلب الصفحة البطيئة
+    @Volatile private var prefetchThread: Thread? = null
 
     private fun headers() = mapOf(
         "User-Agent" to ONS_UA,
@@ -247,8 +249,11 @@ class OnShortProvider : MainAPI() {
     // وصولها قبل أن يضغط المستخدم على تشغيل (بدلًا من انتظارها في loadLinks وتجاوز المهلة → "لايوجد روابط").
     private fun prefetchTicket(postId: String) {
         if (cached?.postId == postId) return
+        // إن كان جلب لهذا المسلسل قيد التنفيذ فلا نبدأ جلبًا آخر
+        val running = prefetchThread
+        if (running != null && running.isAlive) return
         val deadline = System.currentTimeMillis() + 30000
-        Thread {
+        val th = Thread {
             var attempt = 0
             while (cached?.postId != postId && System.currentTimeMillis() < deadline) {
                 attempt++
@@ -267,10 +272,12 @@ class OnShortProvider : MainAPI() {
                     // 502/504/مهلة — أعد المحاولة بفاصل قصير
                 }
                 if (cached?.postId != postId && System.currentTimeMillis() < deadline) {
-                    try { Thread.sleep(1500L) } catch (_: InterruptedException) {}
+                    try { Thread.sleep(1200L) } catch (_: InterruptedException) {}
                 }
             }
-        }.start()
+        }
+        prefetchThread = th
+        th.start()
     }
 
     // ---------- روابط التشغيل (loadLinks) ----------
@@ -334,12 +341,46 @@ class OnShortProvider : MainAPI() {
         } catch (e: Exception) { false }
     }
 
-    // يجلب التذكرة من صفحة التفاصيل المعاد بناؤها عبر ?p={postId}
-    private suspend fun fetchTicket(postId: String): String? {
-        val page = getWithRetry(detailUrl(postId), mainUrl, headers()) ?: return null
-        val ticket = detailTicketRe.find(page)?.groupValues?.get(1) ?: return null
-        cached = PlayCache(postId, ticket)
-        return ticket
+    // يجلب التذكرة من صفحة التفاصيل عبر ?p={postId}.
+    // لو كان الجلب الخلفي قيد التنفيذ ننتظره حتى ثوانٍ (بدلًا من جلب صفحة بطيئة ثانية
+    // قد تتجاوز مهلة loadLinks القصيرة في التطبيق → "لايوجد روابط" عند الضغط السريع).
+    private fun fetchTicket(postId: String): String? {
+        val waitUntil = System.currentTimeMillis() + 6000
+        val running = prefetchThread
+        if (running != null && running.isAlive) {
+            while (running.isAlive && System.currentTimeMillis() < waitUntil) {
+                cached?.let { if (it.postId == postId) return it.ticket }
+                try { Thread.sleep(150L) } catch (_: InterruptedException) { break }
+            }
+            cached?.let { if (it.postId == postId) return it.ticket }
+        }
+        // الجلب الخلفي لم يُثمر — جلبه المباشر بمانع اتصال أصلي يحتمل 502/504 ويهضم الصفحة
+        var attempt = 0
+        while (attempt < 3) {
+            try {
+                val conn = java.net.URL(detailUrl(postId)).openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("User-Agent", ONS_UA)
+                conn.setRequestProperty("Referer", mainUrl)
+                conn.connectTimeout = 12000
+                conn.readTimeout = 15000
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val page = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                stream?.close()
+                conn.disconnect()
+                val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
+                if (ticket != null) {
+                    cached = PlayCache(postId, ticket)
+                    return ticket
+                }
+            } catch (_: Exception) {
+                // 502/504/مهلة — أعد المحاولة
+            }
+            attempt++
+            if (attempt < 3) try { Thread.sleep(700L * attempt) } catch (_: InterruptedException) {}
+        }
+        return null
     }
 
     // يقرأ جسم استجابة من شبكة أصلية ويعيده كـ JsonNode حتى لو كان HTTP 403
