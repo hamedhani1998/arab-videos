@@ -29,8 +29,10 @@ class ReelShortProvider : MainAPI() {
         return try { mapper.readTree(m.groupValues[1]) } catch (e: Exception) { null }
     }
 
-    // جلب مع إعادة محاولة فورية — الموقع بطيء وغير مستقر وقد يقطع الاتصال أول مرة
-    private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3): String {
+    // جلب مع إعادة محاولة فورية — الموقع بطيء وغير مستقر (DNS متقطع) وقد يقطع أول مرة.
+    // `attempts` أكبر و`backoff` أطول للمواقع الحساسة (صفحات الحلقات والماستر) لأن فشل DNS
+    // قد يستمر لثوانٍ، و Eng الموقّت الداخلي لـ CloudStream قد يقطع قبل النجاح إن كانت الإعادة أسرع.
+    private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3, backoffMs: Long = 300): String {
         var last = ""
         for (i in 0 until attempts) {
             try {
@@ -38,7 +40,7 @@ class ReelShortProvider : MainAPI() {
                 if (text.isNotBlank()) return text
             } catch (e: Exception) { last = "" }
             // مهلة قصيرة قبل الإعادة (بدون kotlinx حتى لا نعتمد على المكتبة)
-            try { Thread.sleep(300) } catch (e: Exception) {}
+            try { Thread.sleep(backoffMs) } catch (e: Exception) {}
         }
         return last
     }
@@ -245,7 +247,7 @@ class ReelShortProvider : MainAPI() {
             }
         // استخدم المسار الموجود في الرابط مباشرة (يتضمن slug — الموقع يرفض الرابط بدون slug)
         val moviePath = if (rawPath.isNotBlank()) rawPath else bookId
-        val res = getWithRetry("$mainUrl/ar/movie/$moviePath", mainUrl)
+        val res = getWithRetry("$mainUrl/ar/movie/$moviePath", mainUrl, 5, 400)
         val root = extractNextData(res) ?: return null
         val data = root.get("props")?.get("pageProps")?.get("data") ?: return null
         val title = textOrNull(data, "book_title") ?: return null
@@ -335,8 +337,9 @@ class ReelShortProvider : MainAPI() {
         // العروض القديمة: كل حلقة لها صفحة تحمل فيديو الحلقة الفعلي (video_url)
         if (family == "1") {
             if (payload.isNotBlank()) {
+                // صفحة الحلقة حسّاسة لفشل DNS → إعادة محاولة أكثر (5) وبمهلة أطول (400ms)
                 try {
-                    val html = getWithRetry(payload, mainUrl, 3)
+                    val html = getWithRetry(payload, mainUrl, 5, 400)
                     val root = extractNextData(html)
                     val d = root?.get("props")?.get("pageProps")?.get("data")
                     val videoUrl = d?.get("video_url")?.takeIf { it.isTextual && it.asText().startsWith("http") }?.asText()
@@ -367,7 +370,8 @@ class ReelShortProvider : MainAPI() {
         if (family == "0" && payload.isNotBlank()) {
             val master = vttMasterUrl(payload) ?: return false
             return try {
-                val masterText = getWithRetry(master, mainUrl)
+                // الماستر على CDN متقطعة DNS → إعادة محاولة أكثر
+                val masterText = getWithRetry(master, mainUrl, 5, 400)
                 // الماستر يوفر 3 جودات (540p/720p/1080p) + ترجمات متعددة — نعرض كل الجودات
                 var found = false
                 val streamRe = Regex("""RESOLUTION=(?:(\d+)x(\d+))[^,]*""")
