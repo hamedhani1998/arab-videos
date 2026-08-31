@@ -55,6 +55,27 @@ class OnShortProvider : MainAPI() {
         "Accept" to "application/json, text/plain, */*",
     )
 
+    // الموقع يفرض تقييد معدل شديد (timeouts / 502 / 504)، خاصة على الصفحات الكبيرة
+    // كصفحة التفاصيل والـ listing. لذلك نعيد المحاولة مع توقّف متزايد قصير،
+    // وإلا فمهلة واحدة تكفي لكي تعود الواجهة null وتظهر الصفحة/البحث فارغين.
+    private suspend fun getWithRetry(
+        url: String,
+        referer: String? = null,
+        headers: Map<String, String> = mapOf(),
+        attempts: Int = 4
+    ): String? {
+        for (i in 0 until attempts) {
+            try {
+                val text = app.get(url, referer = referer, headers = headers).text
+                if (!text.isNullOrBlank()) return text
+            } catch (_: Exception) {
+                // 504/502/مهلة — أعد المحاولة
+            }
+            if (i < attempts - 1) Thread.sleep(1200L * (i + 1))
+        }
+        return null
+    }
+
     // ---------- الصفحة الرئيسية / العرض ----------
     private fun parseListingHtml(html: String, seen: MutableSet<String>): List<SearchResponse> {
         val out = mutableListOf<SearchResponse>()
@@ -77,7 +98,7 @@ class OnShortProvider : MainAPI() {
         return try {
             // الصفحة الأولى تبدأ من 1 عند OnShort (مثل ما يفعله الموقع)؛ نحمي من page=0
             val base = "$ONS_API/listing?page=${maxOf(page, 1)}&per_page=12&lang=ar"
-            val resp = app.get(base, referer = mainUrl, headers = headers()).text
+            val resp = getWithRetry(base, mainUrl, headers()) ?: return null
             // الاستجابة JSON: {"html": "...", "ids": [...], "has_more": ...}
             // نستخرج حقل html (يفك تشفير الكيانات/الاقتباسات) ثم نحوّل البطاقات
             val node = mapper.readTree(resp)
@@ -94,7 +115,7 @@ class OnShortProvider : MainAPI() {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
             val base = "$ONS_API/search?q=$q&limit=48&lang=ar"
-            val text = app.get(base, referer = mainUrl, headers = headers()).text
+            val text = getWithRetry(base, mainUrl, headers()) ?: return null
             // الاستجابة JSON: {"results":[{id,title,base_title,url,cover,total,lang,format,platform}],...}
             val node = mapper.readTree(text)
             val arr = node.get("results") ?: return emptyList()
@@ -120,7 +141,7 @@ class OnShortProvider : MainAPI() {
     // ---------- التفاصيل (load) ----------
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val res = app.get(url, referer = mainUrl, headers = headers()).text
+            val res = getWithRetry(url, mainUrl, headers()) ?: return null
 
             // معرّف المنشور وتذكرة الجلسة لاسترجاع الحلقة لاحقاً
             val postId = detailPostRe.find(res)?.groupValues?.get(1) ?: return null
@@ -228,15 +249,13 @@ class OnShortProvider : MainAPI() {
         for (attempt in 0..1) {
             val ts = System.currentTimeMillis()
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
-            val resp = kotlin.runCatching {
-                app.get(u, referer = mainUrl, headers = headers() + mapOf(
-                    "X-ONShort-Player" to "1",
-                    "X-ONShort-Ticket" to current,
-                    "Cache-Control" to "no-cache, no-store",
-                    "Pragma" to "no-cache",
-                ))
-            }.getOrNull() ?: return null
-            val node = kotlin.runCatching { mapper.readTree(resp.text) }.getOrNull() ?: return null
+            val text = getWithRetry(u, mainUrl, headers() + mapOf(
+                "X-ONShort-Player" to "1",
+                "X-ONShort-Ticket" to current,
+                "Cache-Control" to "no-cache, no-store",
+                "Pragma" to "no-cache",
+            ), attempts = 3) ?: return null
+            val node = kotlin.runCatching { mapper.readTree(text) }.getOrNull() ?: return null
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
