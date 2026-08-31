@@ -549,7 +549,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 18791,
+    "fileSize": 18530,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -561,14 +561,14 @@
     ],
     "version": 1,
     "internalName": "OnShort",
-    "description": "OnShort - مسلسلات دراما قصيرة (عربي/إنجليزي)",
+    "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/OnShort.cs3",
     "name": "OnShort"
   },
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 16088,
+    "fileSize": 16506,
     "status": 1,
     "language": "ar",
     "authors": [

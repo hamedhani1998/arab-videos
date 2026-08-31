@@ -13,9 +13,11 @@ private const val DD_MAIN = "https://www.deep-drama.com"
 private const val DD_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
-// عناوين Blogger: "مشاهدة مسلسل X مترجم كامل جميع الحلقات HD أونلاين"
+// عناوين Blogger: "مشاهدة مسلسل X مترجم كامل جميع الحلقات HD أونلاين | ديب دراما"
 private val titleCleanRe = Regex("""مشاهدة\s*مسلسل\s*(.*?)\s*مترجم.*""", RegexOption.DOT_MATCHES_ALL)
 private val titleAllRe = Regex("""^\s*(?:مشاهدة\s*)?(?:مسلسل\s*)?(.+?)\s*$""")
+// لاحقة الموقع: "| ديب دراما"
+private val titleSiteSuffixRe = Regex("""\s*\|\s*ديب\s*دراما\s*$""")
 
 private class DdEntry(
     val title: String?,
@@ -45,9 +47,10 @@ class DeepDramaProvider : MainAPI() {
 
     private fun cleanTitle(title: String?): String? {
         if (title.isNullOrBlank()) return null
-        val clean = titleCleanRe.find(title)?.groupValues?.get(1)?.trim()
-            ?: titleAllRe.find(title)?.groupValues?.get(1)?.trim()
-            ?: title.trim()
+        val base = titleSiteSuffixRe.replace(title, "").trim()
+        val clean = titleCleanRe.find(base)?.groupValues?.get(1)?.trim()
+            ?: titleAllRe.find(base)?.groupValues?.get(1)?.trim()
+            ?: base.trim()
         if (clean.isBlank()) return null
         return clean
     }
@@ -101,17 +104,44 @@ class DeepDramaProvider : MainAPI() {
         } catch (e: Exception) { null }
     }
 
+    // بطاقات الموقع في صفحة البحث/الرئيسية (بنية .xr-card)
+    // <article class='xr-card'><a href='URL' title='TITLE'>...<img ... src='POSTER'>
+    private val xrCardRe = Regex(
+        """<article class='xr-card'>.*?<a href='([^']+)' title='([^']*)'.*?<img[^>]*src='([^']+)'""",
+        RegexOption.DOT_MATCHES_ALL
+    )
+    // Google تفيد الصورة بالحجم داخل نفس الرابط (=w240) — نكبّرها قليلاً للنوعية
+    private val posterSizeRe = Regex("""=w\d+""")
+
+    // رفع دقة الصورة داخل رابط Blogger (=w240 -> =w720)
+    private fun upgradePoster(u: String): String {
+        return posterSizeRe.replace(u, "=w720")
+    }
+
+    // تحليل بطاقات .xr-card من صفحة (search / home)
+    private fun parseCards(html: String): List<DdEntry> {
+        val out = mutableListOf<DdEntry>()
+        for (m in xrCardRe.findAll(html)) {
+            val url = m.groupValues[1].trim()
+            val title = cleanTitle(m.groupValues[2]) ?: continue
+            val poster = upgradePoster(m.groupValues[3].trim()).ifBlank { null }
+            if (url.isBlank()) continue
+            out.add(DdEntry(title, url, poster))
+        }
+        return out
+    }
+
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val base = "$DD_MAIN/feeds/posts/default?alt=json&q=$q&max-results=12"
+            // صفحة البحث الخاصة بالموقع أصدق من تغذية Blogger (q= فيها غير دقيق)
+            val base = "$DD_MAIN/search?q=$q&max-results=20"
             val text = app.get(base, headers = headers()).text
-            val items = parseFeedEntries(text)
-            val searchLower = query.trim().lowercase()
+            val items = parseCards(text)
+            if (items.isEmpty()) return emptyList()
             items.mapNotNull { e ->
                 val title = e.title ?: return@mapNotNull null
                 val url = e.url ?: return@mapNotNull null
-                if (!title.lowercase().contains(searchLower) && !url.lowercase().contains(searchLower)) return@mapNotNull null
                 newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                     this.posterUrl = e.poster
                 }
@@ -126,7 +156,8 @@ class DeepDramaProvider : MainAPI() {
         val out = mutableListOf<String>()
         for (m in serverBtnRe.findAll(html)) {
             val url = m.groupValues[1].trim()
-            if (url.isNotBlank()) out.add(url)
+            // نتجاهل القيم غير الصالحة (مثل نصوص JS ' + imgFallback + ')
+            if (url.startsWith("http") && url.isNotBlank()) out.add(url)
         }
         return out
     }
@@ -134,17 +165,21 @@ class DeepDramaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val doc = app.get(url, headers = headers()).document
+            val raw = doc.html()
 
             // العنوان: og:title ثم <title> (jsoup يفك تشفير الكيانات HTML تلقائياً)
             val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?.let { cleanTitle(it) }
                 ?: cleanTitle(doc.title()).orEmpty()
                 .ifBlank { "Deep Drama" }
+            // الصورة: og:image إن وُجد، وإلا أول صورة حقيقية داخل الصفحة
+            // (الموقع لا يضيف og:image — الغلاف الحقيقي هو صورة goodshort / blogger)
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: extractPoster(raw)
             val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
 
             // الخوادم داخل صفحة المسلسل
-            val servers = serverButtons(doc.html())
+            val servers = serverButtons(raw)
             if (servers.isEmpty()) return null
 
             // كل مسلسل = حلقة واحدة (الفيديو الكامل المدمج)
@@ -161,6 +196,16 @@ class DeepDramaProvider : MainAPI() {
                 this.plot = plot
             }
         } catch (e: Exception) { null }
+    }
+
+    // استخراج صورة الغلاف من HTML المشاركة (بعد تفكيك الكيانات)
+    private fun extractPoster(raw: String): String? {
+        val html = raw.replace("&amp;", "&")
+        // غلاف المنصة المباشر أولاً (goodshort)، ثم صور Blogger
+        return Regex("""https://(?:acf\.)?goodshort\.com/[^"'\s<>\\]+?\.(?:jpg|jpeg|png|webp)[^"'\s<>\\]*""")
+            .find(html)?.value
+            ?: Regex("""https://blogger\.googleusercontent\.com/[^"'\s<>\\]+?\.(?:jpg|jpeg|png|webp)[^"'\s<>\\]*""")
+                .find(html)?.value
     }
 
     override suspend fun loadLinks(

@@ -12,9 +12,10 @@ private val mapper = ObjectMapper().registerKotlinModule()
 private const val ONS_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
-// قاعدة واجهة برمجة تطبيقات OnShort (نفسها للنسختين عربي/إنجليزي، يختلف فقط param lang)
+// قواعد واجهات برمجة التطبيقات (نفسها للنسخة العربية)
+private const val ONS_MAIN = "https://onshort.net/ar"
 private const val ONS_API = "https://onshort.net/wp-json/onshort-theme/v1"
-private const val ONS_PLAY_API = "https://onshort.net/wp-json/onshort-shortmax/v1"
+private const val ONS_PLAY_API = "https://onshort.net/wp-json/onshort-player/v1/episode"
 
 // بطاقة مسلسل على الصفحة الرئيسية / البحث (يُحلَّل من HTML الخاص بـ listing)
 private val cardRe = Regex(
@@ -22,38 +23,25 @@ private val cardRe = Regex(
     RegexOption.DOT_MATCHES_ALL
 )
 
-// مفاتيح في صفحة التفاصيل
-// المعرّف الأهم هو الرقم داخل رابط runtime (/series/{id}/runtime) لأنه المطابق لرابط الحلقة
-private val runtimeIdRe = Regex("""/series/(\d{3,12})/runtime""")
-private val detailTotalRe = Regex("""(?:total"|Episodes")\s*:\s*(\d{1,5})""")
+// مفاتيح في صفحة التفاصيل — الموقع يستخدم بنية onshort-player:
+//   data-post="{id}"  و  data-player-ticket="{ticket}"  لتشغيل الحلقة
+private val detailPostRe = Regex("""data-post="(\d{3,12})"""")
+private val detailTicketRe = Regex("""data-player-ticket="([^"]+)"""")
 private val ogTitleRe = Regex("""<meta\s+property="og:title"\s+content="([^"]+)"""")
 private val ogImageRe = Regex("""<meta\s+property="og:image"\s+content="([^"]+)"""")
 private val ogDescRe = Regex("""<meta\s+property="og:description"\s+content="([^"]+)"""")
 
-// نتيجة تشغيل الحلقة من واجهة التشغيل
-private data class OnsEpisode(
-    val url: String?,
-    val sources: Map<String, String>? = null,
-    val subtitleList: List<OtherSubtitle>? = null,
-)
-
-private data class OtherSubtitle(
-    val url: String?,
-    val lang: String?,
-)
-
 /**
- * OnShort — WordPress REST API يجمّع عدة منصات (shortmax/netshort/goodshort…).
- * النسخة العربية والنسخة الإنجليزية عقدهما نفس البنية؛ فقط mainUrl و lang يختلفان.
- * الإصداران مسجّلان كأساسيين منفصلين (OnShortArabicProvider / OnShortEnglishProvider).
+ * OnShort — WordPress REST API يجمّع عدة منصات (shortmax/netshort/reelshort/goodshort…).
+ * النسخة العربية فقط.
+ * التشغيل: يحمّل صفحة المسلسل -> يستخرج post id و player-ticket ->
+ * يستدعي GET /wp-json/onshort-player/v1/episode?post={id}&episode={n}
+ * برأسَي X-ONShort-Player و X-ONShort-Ticket ويعيد m3u8 (مقاطع TS نظيفة).
  */
-abstract class OnShortProvider : MainAPI() {
-    // lang المستخدم في واجهات البحث/العرض
-    abstract val apiLang: String
-
-    // رابط الموقع كأساس (العربي ينتهي /ar)
-    override var mainUrl: String = "https://onshort.net"
-
+class OnShortProvider : MainAPI() {
+    override var name = "OnShort (عربي)"
+    override var mainUrl = ONS_MAIN
+    override var lang = "ar"
     override val hasMainPage = true
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
@@ -88,7 +76,7 @@ abstract class OnShortProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             // الصفحة الأولى تبدأ من 1 عند OnShort (مثل ما يفعله الموقع)
-            val base = "$ONS_API/listing?page=$page&per_page=12&lang=$apiLang"
+            val base = "$ONS_API/listing?page=$page&per_page=12&lang=ar"
             val resp = app.get(base, referer = mainUrl, headers = headers()).text
             // seen محلي لكل استدعاء حتى تظهر الصفحة في كل مرة يُعاد فتحها
             val items = parseListingHtml(resp, java.util.HashSet())
@@ -101,7 +89,7 @@ abstract class OnShortProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val base = "$ONS_API/search?q=$q&limit=48&lang=$apiLang"
+            val base = "$ONS_API/search?q=$q&limit=48&lang=ar"
             val text = app.get(base, referer = mainUrl, headers = headers()).text
             // الاستجابة JSON: {"results":[{id,title,base_title,url,cover,total,lang,format,platform}],...}
             val node = mapper.readTree(text)
@@ -130,13 +118,13 @@ abstract class OnShortProvider : MainAPI() {
         return try {
             val res = app.get(url, referer = mainUrl, headers = headers()).text
 
-            // معرّف المنشور (WP post id) الذي تستخدمه واجهة التشغيل — من رابط runtime أولاً
-            val postId = runtimeIdRe.find(res)?.groupValues?.get(1)
-                ?: Regex(""""id":(\d{3,12})""").find(res)?.groupValues?.get(1)
-                ?: return null
+            // معرّف المنشور وتذكرة الجلسة لاسترجاع الحلقة لاحقاً
+            val postId = detailPostRe.find(res)?.groupValues?.get(1) ?: return null
+            val ticket = detailTicketRe.find(res)?.groupValues?.get(1) ?: return null
 
             // عدد الحلقات
-            val total = detailTotalRe.find(res)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            val total = Regex("""(?:total"|Episodes")\s*:\s*(\d{1,5})""")
+                .find(res)?.groupValues?.get(1)?.toIntOrNull() ?: 1
 
             // العنوان: og:title ثم H1 احتياطياً
             val title = ogTitleRe.find(res)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
@@ -149,9 +137,9 @@ abstract class OnShortProvider : MainAPI() {
             val plot = ogDescRe.find(res)?.groupValues?.get(1)
 
             val eps = mutableListOf<Episode>()
-            // كل حلقة نمرر (postId | رقم الحلقة) لاسترجاع الرابط لاحقاً
+            // كل حلقة نمرر (postId | رقم الحلقة | ticket) لاسترجاع الرابط لاحقاً
             for (n in 1..total) {
-                eps.add(newEpisode("$postId|$n") {
+                eps.add(newEpisode("$postId|$n|$ticket") {
                     this.episode = n
                     this.name = "الحلقة $n"
                 })
@@ -173,37 +161,42 @@ abstract class OnShortProvider : MainAPI() {
     ): Boolean {
         return try {
             val parts = data.split("|")
-            if (parts.size != 2) return false
+            if (parts.size != 3) return false
             val postId = parts[0]
             val ep = parts[1].toIntOrNull() ?: return false
-            val epUrl = "$ONS_PLAY_API/series/$postId/episode/$ep"
-            val text = app.get(epUrl, referer = mainUrl, headers = headers()).text
-            val node = mapper.readTree(text)
-            if (node.has("error") || node.has("code")) return false
+            var ticket = parts[2]
+            if (ticket.isBlank()) return false
 
-            // المصادر: 480/720/1080 — نعرض كل جودة حقيقية كرابط منفصل
-            val sources = node.get("sources")
+            var node = fetchEpisode(postId, ep, ticket) ?: return false
+            // إن عادت الاستجابة بتذكرة جديدة نحدّثها لاستخدامها في إعادة المحاولة
+            node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }?.let { ticket = it }
+
+            if (node.has("error") || node.get("ok")?.asBoolean(false) == false) return false
+
             val emitted = java.util.HashSet<String>()
-            if (sources != null && sources.isObject) {
-                val fields = sources.fields()
-                while (fields.hasNext()) {
-                    val e = fields.next()
-                    val u = e.value?.asText() ?: continue
-                    if (u.isBlank() || !emitted.add(u)) continue
-                    val label = "${e.key}p"
-                    callback(newExtractorLink(name, label, u, ExtractorLinkType.M3U8) {
-                        this.quality = getQualityFromName(label)
+
+            // المصدر الأساسي (m3u8 نظيف بكل الحالات المعروفة)
+            val main = node.get("url")?.asText()
+            if (!main.isNullOrBlank() && emitted.add(main)) {
+                val q = node.get("quality")?.asText() ?: "540p"
+                callback(newExtractorLink(name, "${q}p", main, ExtractorLinkType.M3U8) {
+                    this.quality = getQualityFromName(q)
+                    this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                })
+            }
+
+            // المرشّحات الأخرى (candidates) كلها روابط hls
+            val candidates = node.get("candidates")
+            if (candidates != null && candidates.isArray) {
+                for (c in candidates) {
+                    val cu = c.get("url")?.asText() ?: continue
+                    if (cu.isBlank() || !emitted.add(cu)) continue
+                    val cq = (c.get("quality")?.asText() ?: "540") + "p"
+                    callback(newExtractorLink(name, cq, cu, ExtractorLinkType.M3U8) {
+                        this.quality = getQualityFromName(cq)
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
                 }
-            }
-            // الرابط الرئيسي احتياطياً (قد يكون الجودة المفضلة)
-            val mainUrl0 = node.get("url")?.asText()
-            if (!mainUrl0.isNullOrBlank() && emitted.add(mainUrl0)) {
-                callback(newExtractorLink(name, "تشغيل", mainUrl0, ExtractorLinkType.M3U8) {
-                    this.quality = getQualityFromName((node.get("quality")?.asText() ?: "720p"))
-                    this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                })
             }
 
             // الترجمات (لكل حلقة)
@@ -212,29 +205,41 @@ abstract class OnShortProvider : MainAPI() {
                 for (s in subs) {
                     val su = s.get("url")?.asText() ?: continue
                     if (su.isBlank()) continue
-                    val lang = s.get("lang")?.asText() ?: s.get("subtitleLanguage")?.asText() ?: "ar"
+                    val lang = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
                     try { subtitleCallback(newSubtitleFile(lang, su)) } catch (_: Exception) {}
                 }
             }
             true
         } catch (e: Exception) { false }
     }
-}
 
-class OnShortEnglishProvider : OnShortProvider() {
-    override var name = "OnShort (English)"
-    override var mainUrl = "https://onshort.net"
-    override var lang = "en"
-    override val apiLang = "en"
-    override val mainPage = mainPageOf("latest" to "Latest Short Drama")
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
-}
-
-class OnShortArabicProvider : OnShortProvider() {
-    override var name = "OnShort (عربي)"
-    override var mainUrl = "https://onshort.net/ar"
-    override var lang = "ar"
-    override val apiLang = "ar"
-    override val mainPage = mainPageOf("latest" to "أحدث المسلسلات")
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
+    // استرجاع الحلقة من واجهة onshort-player الجديدة، مع إعادة محاولة عند فشل
+    // المصادقة باستخدام التذكرة الجديدة التي تعيدها الاستجابة (نفس سلوك مشغّل الموقع).
+    private suspend fun fetchEpisode(
+        postId: String,
+        ep: Int,
+        ticket: String
+    ): com.fasterxml.jackson.databind.JsonNode? {
+        var current = ticket
+        for (attempt in 0..1) {
+            val ts = System.currentTimeMillis()
+            val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
+            val resp = kotlin.runCatching {
+                app.get(u, referer = mainUrl, headers = headers() + mapOf(
+                    "X-ONShort-Player" to "1",
+                    "X-ONShort-Ticket" to current,
+                    "Cache-Control" to "no-cache, no-store",
+                    "Pragma" to "no-cache",
+                ))
+            }.getOrNull() ?: return null
+            val node = kotlin.runCatching { mapper.readTree(resp.text) }.getOrNull() ?: return null
+            val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
+            if (newTicket != null) current = newTicket
+            val ok = node.get("ok")?.asBoolean(false) ?: true
+            // فشلت المصادقة (ok=false) لكن توجد تذكرة جديدة — نعيد المحاولة بها مرة واحدة
+            if (!ok && newTicket != null && attempt == 0) continue
+            return node
+        }
+        return null
+    }
 }
