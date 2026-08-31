@@ -157,7 +157,7 @@ class ReelShortProvider : MainAPI() {
             "ar" -> "/ar"
             else -> "/${request.data}"
         }
-        val html = try { app.get("$mainUrl$path", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
+        val html = try { getWithRetry("$mainUrl$path", mainUrl) } catch (e: Exception) { "" }
 
         val all = mutableListOf<SearchResponse>()
 
@@ -206,7 +206,7 @@ class ReelShortProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         val q = java.net.URLEncoder.encode(query, "UTF-8")
         val searchPath = "/ar/search?keywords=$q&type=movies"
-        val html = try { app.get("$mainUrl$searchPath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
+        val html = try { getWithRetry("$mainUrl$searchPath", mainUrl) } catch (e: Exception) { "" }
 
         // محاولة 1: __NEXT_DATA__ من نفس الرد المُجلب (بدون طلب ثانٍ)
         val root = extractNextData(html)
@@ -245,9 +245,7 @@ class ReelShortProvider : MainAPI() {
             }
         // استخدم المسار الموجود في الرابط مباشرة (يتضمن slug — الموقع يرفض الرابط بدون slug)
         val moviePath = if (rawPath.isNotBlank()) rawPath else bookId
-        val res = try {
-            app.get("$mainUrl/ar/movie/$moviePath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text
-        } catch (e: Exception) { "" }
+        val res = getWithRetry("$mainUrl/ar/movie/$moviePath", mainUrl)
         val root = extractNextData(res) ?: return null
         val data = root.get("props")?.get("pageProps")?.get("data") ?: return null
         val title = textOrNull(data, "book_title") ?: return null
@@ -369,7 +367,7 @@ class ReelShortProvider : MainAPI() {
         if (family == "0" && payload.isNotBlank()) {
             val master = vttMasterUrl(payload) ?: return false
             return try {
-                val masterText = app.get(master, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+                val masterText = getWithRetry(master, mainUrl)
                 // الماستر يوفر 3 جودات (540p/720p/1080p) + ترجمات متعددة — نعرض كل الجودات
                 var found = false
                 val streamRe = Regex("""RESOLUTION=(?:(\d+)x(\d+))[^,]*""")

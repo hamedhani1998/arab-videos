@@ -166,9 +166,22 @@ class ShortTVProvider : MainAPI() {
         return null
     }
 
+    // جلب مع إعادة محاولة فورية — الموقع بطيء وغير مستقر (فشل DNS/انقطاع مؤقت)
+    private suspend fun getWithRetry(url: String, attempts: Int = 3): String {
+        var last = ""
+        for (i in 0 until attempts) {
+            try {
+                val text = app.get(url, referer = mainUrl).text
+                if (text.isNotBlank()) return text
+            } catch (e: Exception) { last = "" }
+            try { Thread.sleep(300) } catch (e: Exception) {}
+        }
+        return last
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val res = app.get("$mainUrl/${request.data}", referer = mainUrl).text
+            val res = getWithRetry("$mainUrl/${request.data}")
             val items = parseShowList(res)
             if (items.isEmpty()) null else newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
@@ -176,7 +189,7 @@ class ShortTVProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            val res = app.get("$mainUrl/ar", referer = mainUrl).text
+            val res = getWithRetry("$mainUrl/ar")
             val all = parseShowList(res)
             val q = query.trim().lowercase()
             if (q.isBlank()) all else all.filter { it.name.lowercase().contains(q) }
@@ -189,7 +202,7 @@ class ShortTVProvider : MainAPI() {
             val path = url.substringAfter("/ar/").substringAfter("/")
             val showId = showIdFromPath(path) ?: return null
             // صفحة الحلقة الأولى تحوي بيانات المسلسل كاملة في __NUXT_DATA__
-            val res = app.get("$mainUrl/ar/episode/$showId-1", referer = mainUrl).text
+            val res = getWithRetry("$mainUrl/ar/episode/$showId-1")
             val nuxt = extractNuxtData(res)
             val show = nuxt?.let { parseShowFromNuxt(it) }
             val effectiveShortPlayId = show?.shortPlayId?.takeIf { it.all(Char::isDigit) } ?: showId

@@ -454,7 +454,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 21918,
+    "fileSize": 23261,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -464,7 +464,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 5,
+    "version": 6,
     "internalName": "ShortTV",
     "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/ShortTV.cs3",
@@ -530,7 +530,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 29141,
+    "fileSize": 28785,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -540,7 +540,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 5,
+    "version": 6,
     "internalName": "ReelShort",
     "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/ReelShort.cs3",
