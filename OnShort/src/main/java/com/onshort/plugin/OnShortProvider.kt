@@ -293,14 +293,12 @@ class OnShortProvider : MainAPI() {
             val postId = parts[0]
             val ep = parts[1].toIntOrNull() ?: return false
 
-            // التذكرة: من الحفظ المؤقت أو بجلب صفحة التفاصيل (?p={postId})
-            val ticket = cached?.takeIf { it.postId == postId }?.ticket
-                ?: fetchTicket(postId) ?: return false
+            // التذكرة: إن كانت محفوظة نستخدمها، وإلا نبدأ بدون تذكرة —
+            // fetchEpisode يبني التذكرة بنفسه من استجابة التشغيل (بدون صفحة ?p= البطيئة)
+            // حتى لا تتجاوز مهلة loadLinks القصيرة في التطبيق → "لايوجد روابط".
+            val cachedTicket = cached?.takeIf { it.postId == postId }?.ticket
 
-            var node = fetchEpisode(postId, ep, ticket) ?: return false
-            node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }?.let {
-                cached = PlayCache(postId, it)
-            }
+            val node = fetchEpisode(postId, ep, cachedTicket) ?: return false
 
             if (node.has("error") || node.get("ok")?.asBoolean(false) == false) return false
 
@@ -420,23 +418,27 @@ class OnShortProvider : MainAPI() {
     private suspend fun fetchEpisode(
         postId: String,
         ep: Int,
-        ticket: String
+        ticket: String?
     ): JsonNode? {
         var current = ticket
-        for (attempt in 0..2) {
+        for (attempt in 0..3) {
             val ts = System.currentTimeMillis()
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
-            val node = rawGetJson(u, mainUrl, mapOf(
-                "X-ONShort-Ticket" to current,
-                // مطلوب بشدة: بدونه يعيد الخادم 403/ok:false حتى مع تذكرة صالحة
-                "X-ONShort-Player" to "1",
-            )) ?: return null
+            // إن لم تكن لدينا تذكرة نرسل بدونها: الخادم يرد 403 مع تذكرة صالحة في الجسم
+            // نبدأ منها (boootstrap سريع — لا حاجة لصفحة ?p= البطيئة التي كانت تسبب المهلة).
+            val hdrs = mutableMapOf("X-ONShort-Player" to "1") // مطلوب بشدة
+            if (!current.isNullOrBlank()) hdrs["X-ONShort-Ticket"] = current
+            val node = rawGetJson(u, mainUrl, hdrs) ?: return null
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
-            // تذكرة منتهية / ok=false: أعد المحاولة فورًا بالتذكرة الجديدة
-            // التي أرجعها الخادم (من جسم 403 أو من ok=false) — لا حاجة لجلب الصفحة.
-            if (!ok && newTicket != null && attempt < 2) continue
+            if (!ok) {
+                // تذكرة غير صالحة/منتهية: أعد المحاولة فورًا بالتذكرة الجديدة من الجسم
+                if (newTicket != null && attempt < 3) continue
+                return null
+            }
+            // نجاح: احفظ التذكرة الجديدة لبقية الحلقات (بلا جلب صفحة)
+            if (newTicket != null) cached = PlayCache(postId, newTicket)
             return node
         }
         return null
