@@ -75,11 +75,15 @@ class OnShortProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            // الصفحة الأولى تبدأ من 1 عند OnShort (مثل ما يفعله الموقع)
-            val base = "$ONS_API/listing?page=$page&per_page=12&lang=ar"
+            // الصفحة الأولى تبدأ من 1 عند OnShort (مثل ما يفعله الموقع)؛ نحمي من page=0
+            val base = "$ONS_API/listing?page=${maxOf(page, 1)}&per_page=12&lang=ar"
             val resp = app.get(base, referer = mainUrl, headers = headers()).text
+            // الاستجابة JSON: {"html": "...", "ids": [...], "has_more": ...}
+            // نستخرج حقل html (يفك تشفير الكيانات/الاقتباسات) ثم نحوّل البطاقات
+            val node = mapper.readTree(resp)
+            val html = node.get("html")?.asText() ?: return null
             // seen محلي لكل استدعاء حتى تظهر الصفحة في كل مرة يُعاد فتحها
-            val items = parseListingHtml(resp, java.util.HashSet())
+            val items = parseListingHtml(html, java.util.HashSet())
             if (items.isEmpty()) null
             else newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
