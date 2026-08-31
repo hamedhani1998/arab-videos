@@ -1,6 +1,7 @@
 package com.onshort.plugin
 
 import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
@@ -50,6 +51,8 @@ class OnShortProvider : MainAPI() {
     // الواجهة الرئيسية: صف لكل منصة من المنصات التي يجمعها الموقع،
     // بحيث تظهر مسلسلات كل منصة مضمّنة في قسمها المخصص.
     // المفتاح = اسم المنصة كما يظهر في رابط /ar/platform/{slug}/.
+    // كل المنصات المتوفرة في الموقع (تحقّقت كلها تُرجع بطاقات — أغسطس 2026):
+    // shortmax/netshort/reelshort/dramawave/idrama/goodshort/dramabox/flextv/freereels
     private val platformRows = listOf(
         "shortmax" to "أحدث مسلسلات ShortMax",
         "netshort" to "أحدث مسلسلات NetShort",
@@ -57,6 +60,9 @@ class OnShortProvider : MainAPI() {
         "dramawave" to "أحدث مسلسلات DramaWave",
         "idrama" to "أحدث مسلسلات iDrama",
         "goodshort" to "أحدث مسلسلات GoodShort",
+        "dramabox" to "أحدث مسلسلات DramaBox",
+        "flextv" to "أحدث مسلسلات FlexTV",
+        "freereels" to "أحدث مسلسلات FreeReels",
     )
 
     override val mainPage = mainPageOf(
@@ -336,26 +342,56 @@ class OnShortProvider : MainAPI() {
         return ticket
     }
 
+    // يقرأ جسم استجابة من شبكة أصلية ويعيده كـ JsonNode حتى لو كان HTTP 403
+    // (التذكرة المنتهية تُرجع 403 مع جسم {ok:false,retryable:true,ticket:يديدة} —
+    // يجب قراءة هذا الجسم لاستخراج التذكرة الجديدة بدلًا من اعتبارها فشلًا).
+    private fun rawGetJson(url: String, referer: String, extraHeaders: Map<String, String>): JsonNode? {
+        var attempt = 0
+        while (attempt < 3) {
+            try {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("User-Agent", ONS_UA)
+                conn.setRequestProperty("Referer", referer)
+                conn.setRequestProperty("Accept", "application/json, text/plain, */*")
+                conn.setRequestProperty("Cache-Control", "no-cache, no-store")
+                conn.setRequestProperty("Pragma", "no-cache")
+                for ((k, v) in extraHeaders) conn.setRequestProperty(k, v)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 25000
+                val code = conn.responseCode
+                // اقرأ الجسم من تدفق النجاح أو تدفق الخطأ (403/5xx) على حد سواء
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                stream?.close()
+                conn.disconnect()
+                val node = mapper.readTree(body)
+                if (node != null) return node
+            } catch (_: Exception) {
+                // 502/504/مهلة — أعد المحاولة
+            }
+            attempt++
+            if (attempt < 3) try { Thread.sleep(900L * attempt) } catch (_: InterruptedException) {}
+        }
+        return null
+    }
+
     private suspend fun fetchEpisode(
         postId: String,
         ep: Int,
         ticket: String
-    ): com.fasterxml.jackson.databind.JsonNode? {
+    ): JsonNode? {
         var current = ticket
-        for (attempt in 0..1) {
+        for (attempt in 0..2) {
             val ts = System.currentTimeMillis()
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
-            val text = getWithRetry(u, mainUrl, headers() + mapOf(
-                "X-ONShort-Player" to "1",
-                "X-ONShort-Ticket" to current,
-                "Cache-Control" to "no-cache, no-store",
-                "Pragma" to "no-cache",
-            ), attempts = 3) ?: return null
-            val node = kotlin.runCatching { mapper.readTree(text) }.getOrNull() ?: return null
+            val node = rawGetJson(u, mainUrl, mapOf("X-ONShort-Ticket" to current)) ?: return null
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
-            if (!ok && newTicket != null && attempt == 0) continue
+            // تذكرة منتهية / ok=false: أعد المحاولة فورًا بالتذكرة الجديدة
+            // التي أرجعها الخادم (من جسم 403 أو من ok=false) — لا حاجة لجلب الصفحة.
+            if (!ok && newTicket != null && attempt < 2) continue
             return node
         }
         return null
