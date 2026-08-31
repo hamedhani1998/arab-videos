@@ -62,7 +62,7 @@ class OnShortProvider : MainAPI() {
         url: String,
         referer: String? = null,
         headers: Map<String, String> = mapOf(),
-        attempts: Int = 4
+        attempts: Int = 3
     ): String? {
         for (i in 0 until attempts) {
             try {
