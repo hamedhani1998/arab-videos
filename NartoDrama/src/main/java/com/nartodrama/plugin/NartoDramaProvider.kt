@@ -247,7 +247,7 @@ class NartoDramaProvider : MainAPI() {
             }
 
             // 2) the video — Narto aggregates from many backends, so a work can carry:
-            //      a) multi_resolutions -> the full 1080/720/480 quality set (per-resolution URLs)
+            //      a) multi_resolutions -> the per-resolution stream_url set (1080/720/480)
             //      b) a single play_url / direct_play_url (HLS master/media, or a direct MP4 file)
             // We emit EVERY distinct URL with its correct container type so the right link plays.
             val emitted = LinkedHashSet<String>()
@@ -266,6 +266,7 @@ class NartoDramaProvider : MainAPI() {
                 any = true
             }
 
+            // multi_resolutions first — the full per-quality URL set.
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
             if (resolutions.isNotEmpty()) {
@@ -289,11 +290,16 @@ class NartoDramaProvider : MainAPI() {
                     }
                     emit(u, label, q)
                 }
-            } else {
-                // Fallback: single link(s). Emit the raw source AND the local proxy variant
-                // (deduped) for redundancy — one of the two is what the web player actually uses.
-                for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
             }
+
+            // ALWAYS also surface play_url + direct_play_url (deduped against the URLs above).
+            // Rationale: the per-quality multi_resolutions URLs are often short-lived signed token
+            // links (shortmax-stream, hakuna, montagehub, netshort...) that are already expired or
+            // dead by the time the user taps play — but direct_play_url is the reliable narto-local
+            // proxy (stream-e1 /e/m or cdn.narto-drama.com MP4). Emitting them as fallbacks means a
+            // work still plays even when every multi_resolutions token has lapsed. This is the fix
+            // for "المسلسل يعرض حلقات ولا تشتغل": multi_res empty-but-dead no longer hides the good link.
+            for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
 
             any
         } catch (e: Exception) {
