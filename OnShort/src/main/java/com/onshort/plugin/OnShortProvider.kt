@@ -426,7 +426,11 @@ class OnShortProvider : MainAPI() {
         for (attempt in 0..2) {
             val ts = System.currentTimeMillis()
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
-            val node = rawGetJson(u, mainUrl, mapOf("X-ONShort-Ticket" to current)) ?: return null
+            val node = rawGetJson(u, mainUrl, mapOf(
+                "X-ONShort-Ticket" to current,
+                // مطلوب بشدة: بدونه يعيد الخادم 403/ok:false حتى مع تذكرة صالحة
+                "X-ONShort-Player" to "1",
+            )) ?: return null
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
