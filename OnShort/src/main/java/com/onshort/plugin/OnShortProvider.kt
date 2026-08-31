@@ -62,15 +62,13 @@ abstract class OnShortProvider : MainAPI() {
         "latest" to "أحدث المسلسلات",
     )
 
-    private val seen = java.util.HashSet<String>()
-
     private fun headers() = mapOf(
         "User-Agent" to ONS_UA,
         "Accept" to "application/json, text/plain, */*",
     )
 
     // ---------- الصفحة الرئيسية / العرض ----------
-    private fun parseListingHtml(html: String): List<SearchResponse> {
+    private fun parseListingHtml(html: String, seen: MutableSet<String>): List<SearchResponse> {
         val out = mutableListOf<SearchResponse>()
         for (m in cardRe.findAll(html)) {
             val id = m.groupValues[1]
@@ -92,7 +90,8 @@ abstract class OnShortProvider : MainAPI() {
             // الصفحة الأولى تبدأ من 1 عند OnShort (مثل ما يفعله الموقع)
             val base = "$ONS_API/listing?page=$page&per_page=12&lang=$apiLang"
             val resp = app.get(base, referer = mainUrl, headers = headers()).text
-            val items = parseListingHtml(resp)
+            // seen محلي لكل استدعاء حتى تظهر الصفحة في كل مرة يُعاد فتحها
+            val items = parseListingHtml(resp, java.util.HashSet())
             if (items.isEmpty()) null
             else newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
@@ -108,6 +107,7 @@ abstract class OnShortProvider : MainAPI() {
             val node = mapper.readTree(text)
             val arr = node.get("results") ?: return emptyList()
             val out = mutableListOf<SearchResponse>()
+            val seen = java.util.HashSet<String>()
             for (it in arr) {
                 val title = it.get("title")?.asText()?.takeIf { x -> x.isNotBlank() }
                     ?: it.get("base_title")?.asText() ?: continue

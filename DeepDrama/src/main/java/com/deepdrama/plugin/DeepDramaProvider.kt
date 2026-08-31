@@ -41,8 +41,6 @@ class DeepDramaProvider : MainAPI() {
         "latest" to "أحدث المسلسلات",
     )
 
-    private val seen = java.util.HashSet<String>()
-
     private fun headers() = mapOf("User-Agent" to DD_UA)
 
     private fun cleanTitle(title: String?): String? {
@@ -94,7 +92,6 @@ class DeepDramaProvider : MainAPI() {
                 val list = items.mapNotNull { e ->
                     val title = e.title ?: return@mapNotNull null
                     val url = e.url ?: return@mapNotNull null
-                    if (!seen.add(url)) return@mapNotNull null
                     newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                         this.posterUrl = e.poster
                     }
@@ -115,7 +112,6 @@ class DeepDramaProvider : MainAPI() {
                 val title = e.title ?: return@mapNotNull null
                 val url = e.url ?: return@mapNotNull null
                 if (!title.lowercase().contains(searchLower) && !url.lowercase().contains(searchLower)) return@mapNotNull null
-                if (!seen.add(url)) return@mapNotNull null
                 newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                     this.posterUrl = e.poster
                 }
@@ -137,19 +133,18 @@ class DeepDramaProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val res = app.get(url, headers = headers()).text
+            val doc = app.get(url, headers = headers()).document
 
-            val title = Regex("""<meta\s+property="og:title"\s+content="([^"]+)""")
-                .find(res)?.groupValues?.get(1)?.let { cleanTitle(it) }
-                ?: cleanTitle(url.substringAfterLast('/').substringBefore('?')).orEmpty()
+            // العنوان: og:title ثم <title> (jsoup يفك تشفير الكيانات HTML تلقائياً)
+            val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
+                ?.let { cleanTitle(it) }
+                ?: cleanTitle(doc.title()).orEmpty()
                 .ifBlank { "Deep Drama" }
-            val poster = Regex("""<meta\s+property="og:image"\s+content="([^"]+)""")
-                .find(res)?.groupValues?.get(1)
-            val plot = Regex("""<meta\s+property="og:description"\s+content="([^"]+)""")
-                .find(res)?.groupValues?.get(1)
+            val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
 
             // الخوادم داخل صفحة المسلسل
-            val servers = serverButtons(res)
+            val servers = serverButtons(doc.html())
             if (servers.isEmpty()) return null
 
             // كل مسلسل = حلقة واحدة (الفيديو الكامل المدمج)
