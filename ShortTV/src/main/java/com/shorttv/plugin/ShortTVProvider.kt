@@ -219,7 +219,12 @@ class ShortTVProvider : MainAPI() {
             val playable = sortedEps.filter { it.isFree }
             val eps = playable.mapIndexed { index, ep ->
                 val serialNo = index + 1
-                newEpisode("$effectiveShortPlayId|${ep.episodeNum}") {
+                // نمرّر روابط الجودات داخل بيانات الحلقة مباشرة
+                // ("id|episodeNum|u480|u720|u1080") لكي لا نعيد جلب الصفحة في loadLinks
+                // (الموقع بطيء وقد يفشل الجلب الثاني → بدون روابط)
+                newEpisode(
+                    "$effectiveShortPlayId|${ep.episodeNum}|${ep.videoUrl480 ?: ""}|${ep.videoUrl720 ?: ""}|${ep.videoUrl1080 ?: ""}"
+                ) {
                     episode = serialNo
                     name = "الحلقة $serialNo"
                 }
@@ -231,36 +236,6 @@ class ShortTVProvider : MainAPI() {
         } catch (e: Exception) { null }
     }
 
-    // استخراج معلومات الحلقة من __NUXT_DATA__ لمعرّف معيّن
-    private fun findEpisodeUrls(html: String, episodeNum: Int): Triple<String?, String?, String?>? {
-        val nuxt = extractNuxtData(html) ?: return null
-        for (i in 0 until nuxt.size()) {
-            val e = nuxt.get(i)
-            if (e == null || !e.isObject || !e.has("shortPlayId")) continue
-            val eps = nuxt.get(e.get("episodeList").asInt())
-            if (eps == null || !eps.isArray) continue
-            for (ref in eps) {
-                val epObj = resolveRef(nuxt, ref.asInt()) ?: continue
-                val num = epObj.get("episodeNum")?.asInt() ?: continue
-                if (num != episodeNum) continue
-                val encNode = epObj.get("encryptedVideoUrl") ?: continue
-                if (!encNode.isInt) continue
-                val str = resolveRef(nuxt, encNode.asInt())?.asText() ?: continue
-                // الحلقات المقفلة تأتي encryptedVideoUrl="" (بدون روابط) → ليست قابلة للتشغيل
-                if (str.isBlank()) return null
-                return try {
-                    val obj = mapper.readTree(str)
-                    Triple(
-                        obj.get("video_480")?.asText(),
-                        obj.get("video_720")?.asText(),
-                        obj.get("video_1080")?.asText()
-                    )
-                } catch (_: Exception) { null }
-            }
-        }
-        return null
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -268,28 +243,29 @@ class ShortTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
+            // البيانات من load(): "showId|episodeNum|u480|u720|u1080" — الروابط محمولة مسبقًا
+            // فلا نحتاج جلب صفحة الحلقة مرة أخرى (الموقع بطيء والجلب الثاني قد يفشل)
             val parts = data.split("|")
-            if (parts.size != 2) return false
-            val shortPlayId = parts[0]
-            val ep = parts[1].toIntOrNull() ?: return false
-            // صفحة الحلقة الأولى للمسلسل تكفي لاستخراج كل الحلقات
-            val res = app.get("$mainUrl/ar/episode/${shortPlayId}-1", referer = mainUrl).text
-            val urls = findEpisodeUrls(res, ep) ?: return false
+            if (parts.size < 2) return false
+            val u480 = if (parts.size >= 3) parts[2] else ""
+            val u720 = if (parts.size >= 4) parts[3] else ""
+            val u1080 = if (parts.size >= 5) parts[4] else ""
+            if (u480.isBlank() && u720.isBlank() && u1080.isBlank()) return false
             var found = false
-            urls.third?.let { url ->
-                callback(newExtractorLink(name, "1080p", url, ExtractorLinkType.M3U8) {
+            if (u1080.isNotBlank()) {
+                callback(newExtractorLink(name, "1080p", u1080, ExtractorLinkType.M3U8) {
                     referer = mainUrl; quality = getQualityFromName("1080p")
                 })
                 found = true
             }
-            urls.second?.let { url ->
-                callback(newExtractorLink(name, "720p", url, ExtractorLinkType.M3U8) {
+            if (u720.isNotBlank()) {
+                callback(newExtractorLink(name, "720p", u720, ExtractorLinkType.M3U8) {
                     referer = mainUrl; quality = getQualityFromName("720p")
                 })
                 found = true
             }
-            urls.first?.let { url ->
-                callback(newExtractorLink(name, "480p", url, ExtractorLinkType.M3U8) {
+            if (u480.isNotBlank()) {
+                callback(newExtractorLink(name, "480p", u480, ExtractorLinkType.M3U8) {
                     referer = mainUrl; quality = getQualityFromName("480p")
                 })
                 found = true

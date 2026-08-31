@@ -24,9 +24,23 @@ class ReelShortProvider : MainAPI() {
     )
 
     private fun extractNextData(html: String): JsonNode? {
-        val regex = Regex("""<script id="__NEXT_DATA__" type="application/json">\s*([\s\S]*?)\s*</script>""")
+        val regex = Regex("""<script[^>]*id="__NEXT_DATA__"[^>]*type="application/json"[^>]*>\s*([\s\S]*?)\s*</script>""")
         val m = regex.find(html) ?: return null
         return try { mapper.readTree(m.groupValues[1]) } catch (e: Exception) { null }
+    }
+
+    // جلب مع إعادة محاولة فورية — الموقع بطيء وغير مستقر وقد يقطع الاتصال أول مرة
+    private suspend fun getWithRetry(url: String, referer: String?, attempts: Int = 3): String {
+        var last = ""
+        for (i in 0 until attempts) {
+            try {
+                val text = app.get(url, headers = mapOf("User-Agent" to UA), referer = referer).text
+                if (text.isNotBlank()) return text
+            } catch (e: Exception) { last = "" }
+            // مهلة قصيرة قبل الإعادة (بدون kotlinx حتى لا نعتمد على المكتبة)
+            try { Thread.sleep(300) } catch (e: Exception) {}
+        }
+        return last
     }
 
     private fun textOrNull(node: JsonNode?, vararg paths: String): String? {
@@ -324,7 +338,7 @@ class ReelShortProvider : MainAPI() {
         if (family == "1") {
             if (payload.isNotBlank()) {
                 try {
-                    val html = app.get(payload, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+                    val html = getWithRetry(payload, mainUrl, 3)
                     val root = extractNextData(html)
                     val d = root?.get("props")?.get("pageProps")?.get("data")
                     val videoUrl = d?.get("video_url")?.takeIf { it.isTextual && it.asText().startsWith("http") }?.asText()
