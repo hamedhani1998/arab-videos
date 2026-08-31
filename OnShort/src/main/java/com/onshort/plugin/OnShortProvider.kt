@@ -14,7 +14,7 @@ private val mapper = ObjectMapper().registerKotlinModule()
 private const val ONS_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
-// قواعد واجهات برمجة التطبيقات (نفسها للنسخة العربية)
+// قواعد واجهات برمجة التطبيقات
 private const val ONS_MAIN = "https://onshort.net/ar"
 private const val ONS_API = "https://onshort.net/wp-json/onshort-theme/v1"
 private const val ONS_PLAY_API = "https://onshort.net/wp-json/onshort-player/v1/episode"
@@ -25,8 +25,7 @@ private val cardRe = Regex(
     RegexOption.DOT_MATCHES_ALL
 )
 
-// مفاتيح في صفحة التفاصيل — الموقع يستخدم بنية onshort-player:
-//   data-post="{id}"  و  data-player-ticket="{ticket}"  لتشغيل الحلقة
+// مفاتيح التذكرة في صفحة التفاصيل (أو في page?p={id})
 private val detailPostRe = Regex("""data-post="(\d{3,12})"""")
 private val detailTicketRe = Regex("""data-player-ticket="([^"]+)"""")
 
@@ -34,10 +33,11 @@ private val detailTicketRe = Regex("""data-player-ticket="([^"]+)"""")
  * OnShort — WordPress REST API يجمّع عدة منصات (shortmax/netshort/reelshort/goodshort…).
  * النسخة العربية فقط.
  *
- * الموقع بطيء جداً ويقيّد المعدل (صفحة التفاصيل ~115KB وتستغرق 10-17 ثانية)، لذلك:
- * - load() يبني قائمة الحلقات فوراً من بيانات مضمّنة في رابط البطاقة (؟cs=)
- *   ولا يعتمد على جلب صفحة التفاصيل، فلا تظهر أخطاء ولا يتأخر فتح التفاصيل.
- * - التذكرة (ticket) الخاصة بالتشغيل تُجلب كسولًا عند أول تشغيل وتُحفظ مؤقتًا.
+ * الموقع بطيء ويقيّد المعدل بشدة، لذا:
+ * - load(): يبني قائمة الحلقات فورًا من بيانات مضمّنة في رابط البطاقة (؟cs=)
+ *   ولا يعتمد على جلب صفحة التفاصيل (بلا شبكة وبلا أخطاء).
+ * - data الحلقة = "postId|رقم" (صيغة قياسية، بلا روابط طويلة تتلف في التطبيق).
+ * - التذكرة تُجلب في الخلفية أثناء load() وتُحفظ، وتُستعاد عند التشغيل.
  */
 class OnShortProvider : MainAPI() {
     override var name = "OnShort (عربي)"
@@ -51,8 +51,8 @@ class OnShortProvider : MainAPI() {
         "latest" to "أحدث المسلسلات",
     )
 
-    // تذكرة جلستنا المؤقتة لكل مسلسل (نعيد استخدامها لتشغيل عدة حلقات دون إعادة جلب)
-    private class PlayCache(val ref: String, val postId: String, val ticket: String)
+    // تذكرة جلستنا المؤقتة لكل مسلسل (مفتاح = postId)
+    private class PlayCache(val postId: String, val ticket: String)
     @Volatile private var cached: PlayCache? = null
 
     private fun headers() = mapOf(
@@ -60,7 +60,6 @@ class OnShortProvider : MainAPI() {
         "Accept" to "application/json, text/plain, */*",
     )
 
-    // الموقع بطيء/يقيّد المعدل؛ نعيد المحاولة مع توقّف قصير متزايد.
     private suspend fun getWithRetry(
         url: String,
         referer: String? = null,
@@ -79,7 +78,7 @@ class OnShortProvider : MainAPI() {
         return null
     }
 
-    // ---------- بيانات مضمّنة في رابط البطاقة (بديل جلب صفحة التفاصيل) ----------
+    // ---------- بيانات مضمّنة في رابط البطاقة (لجعل load() فوريًا) ----------
     // النموذج: {realUrl}?cs={id}|{total}|{title}|{poster}
     private fun embedMeta(realUrl: String, id: String, total: Int, title: String, poster: String?): String {
         return "$realUrl?cs=${URLEncoder.encode(id, "UTF-8")}|${URLEncoder.encode(total.toString(), "UTF-8")}|" +
@@ -105,6 +104,10 @@ class OnShortProvider : MainAPI() {
         return if (i >= 0) url.substring(0, i) else url
     }
 
+    // رابط صفحة التفاصيل من postId عبر ?p= (ووردبريس) — استخدم النطاق الجذر وليس /ar/
+    // لأن ?p= في /ar/ لا يُرجع التذكرة بينما الجذر يرجعها (تحقّقت).
+    private fun detailUrl(postId: String): String = "https://onshort.net/?p=$postId"
+
     // ---------- الصفحة الرئيسية / العرض ----------
     private fun parseListingHtml(html: String, seen: MutableSet<String>): List<SearchResponse> {
         val out = mutableListOf<SearchResponse>()
@@ -116,7 +119,6 @@ class OnShortProvider : MainAPI() {
             val total = m.groupValues[5].toIntOrNull() ?: 1
             val safeTitle = title.replace(Regex("""\s+"""), " ").trim()
             if (safeTitle.isBlank() || !seen.add(url)) continue
-            // نضمّن بيانات التفاصيل في الرابط لتُبنى قائمة الحلقات فورًا دون جلب صفة التفاصيل
             val metaUrl = embedMeta(url, id, total, safeTitle, poster)
             out.add(newTvSeriesSearchResponse(safeTitle, metaUrl, TvType.TvSeries) {
                 this.posterUrl = poster
@@ -169,46 +171,39 @@ class OnShortProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val meta = parseMeta(url)
-            // إن وُجدت بيانات مضمّنة نبني الحلقات فورًا (سريع، بلا شبكة، بلا أخطاء)
-            // وفي الخلفية نجلب التذكرة (ticket) لنحفظها مؤقتًا حتى يعمل التشغيل فورًا.
             if (meta != null) {
-                prefetchTicket(url)
-                return buildFromMeta(meta, url)
+                // نبني الحلقات فورًا من البيانات المضمّنة، ونجلب التذكرة في الخلفية للتشغيل
+                prefetchTicket(meta.id)
+                return buildEpisodes(meta.id, meta.total, meta.title, meta.poster, stripMeta(url))
             }
 
-            // احتياطي: رابط بدون بيانات (مقابل روابط قديمة أو مشاركة) — نجلب صفحة التفاصيل
+            // احتياطي: رابط بدون بيانات (روابط قديمة/مشاركة) — نجلب صفحة التفاصيل
             val res = getWithRetry(stripMeta(url), mainUrl, headers()) ?: return null
             val postId = detailPostRe.find(res)?.groupValues?.get(1) ?: return null
-            val ticket = detailTicketRe.find(res)?.groupValues?.get(1) ?: return null
+            val ticket = detailTicketRe.find(res)?.groupValues?.get(1)
+            if (ticket != null) cached = PlayCache(postId, ticket)
             val total = Regex("""(?:total"|Episodes")\s*:\s*(\d{1,5})""")
                 .find(res)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-            buildEpisodes(postId, total, ticket, url, extractTitle(res, url), extractPoster(res))
+            buildEpisodes(postId, total, extractTitle(res, stripMeta(url)), extractPoster(res), stripMeta(url))
         } catch (e: Exception) { null }
     }
 
-    private suspend fun buildFromMeta(meta: Meta, url: String): LoadResponse {
-        // التذكرة تُجلب لاحقًا عند التشغيل؛ لذا نقسّم البيانات إلى (رقم الحلقة | رابط التفاصيل)
-        return buildEpisodes(meta.id, meta.total, null, url, meta.title, meta.poster)
-    }
-
+    // data الحلقة = "postId|رقم" (صيغة قياسية لا تتلف في التطبيق)
     private suspend fun buildEpisodes(
         postId: String,
         total: Int,
-        ticket: String?,
-        url: String,
         title: String,
-        poster: String?
+        poster: String?,
+        url: String
     ): LoadResponse {
         val eps = mutableListOf<Episode>()
-        // data = (رقم الحلقة | رابط التفاصيل) حتى نتمكن من جلب تذكرة جديدة عند أول تشغيل
-        val detailRef = if (ticket != null) "$postId|$ticket" else stripMeta(url)
         for (n in 1..maxOf(total, 1)) {
-            eps.add(newEpisode("$n|$detailRef") {
+            eps.add(newEpisode("$postId|$n") {
                 this.episode = n
                 this.name = "الحلقة $n"
             })
         }
-        return newTvSeriesLoadResponse(title, stripMeta(url), TvType.TvSeries, eps) {
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
             this.posterUrl = poster
         }
     }
@@ -226,6 +221,27 @@ class OnShortProvider : MainAPI() {
         return Regex("""<meta\s+property="og:image"\s+content="([^"]+)"""").find(res)?.groupValues?.get(1)
     }
 
+    // نجلب التذكرة في الخلفية (Thread + HttpURLConnection; kotlinx غير متاح) لنحفظها مؤقتًا.
+    // إن فشل الجلب الخلفي لا يتأثر فتح التفاصيل؛ loadLinks سيعيد المحاولة.
+    private fun prefetchTicket(postId: String) {
+        if (cached?.postId == postId) return
+        Thread {
+            try {
+                val conn = java.net.URL(detailUrl(postId)).openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("User-Agent", ONS_UA)
+                conn.setRequestProperty("Referer", mainUrl)
+                conn.connectTimeout = 20000
+                conn.readTimeout = 25000
+                val page = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
+                if (ticket != null) cached = PlayCache(postId, ticket)
+            } catch (_: Exception) {
+                // loadLinks يتعامل مع الحالة عند الحاجة
+            }
+        }.start()
+    }
+
     // ---------- روابط التشغيل (loadLinks) ----------
     override suspend fun loadLinks(
         data: String,
@@ -234,17 +250,18 @@ class OnShortProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            val parts = data.split("|", limit = 2)
+            val parts = data.split("|")
             if (parts.size != 2) return false
-            val ep = parts[0].toIntOrNull() ?: return false
-            val detailRef = parts[1]
+            val postId = parts[0]
+            val ep = parts[1].toIntOrNull() ?: return false
 
-            // استخرج بيانات التشغيل (postId + ticket) — من الحفظ المؤقت أو بجلب صفحة التفاصيل
-            val (postId, ticket) = resolvePlay(detailRef) ?: return false
+            // التذكرة: من الحفظ المؤقت أو بجلب صفحة التفاصيل (?p={postId})
+            val ticket = cached?.takeIf { it.postId == postId }?.ticket
+                ?: fetchTicket(postId) ?: return false
 
             var node = fetchEpisode(postId, ep, ticket) ?: return false
             node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }?.let {
-                cached = PlayCache(detailRef, postId, it)
+                cached = PlayCache(postId, it)
             }
 
             if (node.has("error") || node.get("ok")?.asBoolean(false) == false) return false
@@ -286,49 +303,12 @@ class OnShortProvider : MainAPI() {
         } catch (e: Exception) { false }
     }
 
-    // نجلب التذكرة في الخلفية (Thread عادي + HttpURLConnection لأن kotlinx.coroutines غير متاحة)
-    // فنحفظها مؤقتًا قبل أن يضغط المستخدم على التشغيل؛ وإن فشل هذا فلا يتأثر فتح التفاصيل.
-    private fun prefetchTicket(url: String) {
-        val base = stripMeta(url)
-        if (cached?.ref == base) return
-        Thread {
-            try {
-                val conn = java.net.URL(base).openConnection() as java.net.HttpURLConnection
-                conn.requestMethod = "GET"
-                conn.setRequestProperty("User-Agent", ONS_UA)
-                conn.setRequestProperty("Referer", mainUrl)
-                conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*")
-                conn.connectTimeout = 20000
-                conn.readTimeout = 25000
-                val page = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val postId = detailPostRe.find(page)?.groupValues?.get(1)
-                val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
-                if (postId != null && ticket != null) cached = PlayCache(base, postId, ticket)
-            } catch (_: Exception) {
-                // فشل الجلب الخلفي — سيتعامل معه loadLinks عند الحاجة
-            }
-        }.start()
-    }
-
-    // يحلّ (postId، ticket) من المرجع: إما "postId|ticket" أو رابط صفحة التفاصيل.
-    private suspend fun resolvePlay(detailRef: String): Pair<String, String>? {
-        // الحالة 1: التذكرة محفوظة مباشرة في reference (postId|ticket) — حالة التفاصيل القديمة
-        val idx = detailRef.indexOf('|')
-        if (idx > 0) {
-            val a = detailRef.substring(0, idx)
-            val b = detailRef.substring(idx + 1)
-            if (a.isNotEmpty() && a.all { it.isDigit() } && b.isNotBlank()) {
-                cached = PlayCache(detailRef, a, b)
-                return a to b
-            }
-        }
-        // الحالة 2: reference = رابط صفحة التفاصيل — نستخدم المحفوظ أو نجلب صفحة لاستخراج التذكرة
-        cached?.let { c -> if (c.ref == detailRef) return c.postId to c.ticket }
-        val page = getWithRetry(stripMeta(detailRef), mainUrl, headers()) ?: return null
-        val postId = detailPostRe.find(page)?.groupValues?.get(1) ?: return null
+    // يجلب التذكرة من صفحة التفاصيل المعاد بناؤها عبر ?p={postId}
+    private suspend fun fetchTicket(postId: String): String? {
+        val page = getWithRetry(detailUrl(postId), mainUrl, headers()) ?: return null
         val ticket = detailTicketRe.find(page)?.groupValues?.get(1) ?: return null
-        cached = PlayCache(detailRef, postId, ticket)
-        return postId to ticket
+        cached = PlayCache(postId, ticket)
+        return ticket
     }
 
     private suspend fun fetchEpisode(
