@@ -10,6 +10,8 @@ import com.lagradost.cloudstream3.utils.*
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
+private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 // ---- edge.narto-drama.com is the OPEN (no-Cloudflare) mirror of narto-drama.com ----
 // It serves the native Arabic catalog (including ALL dubbed مدبلج content) at
 //   GET /search?lang=ar-SA&q=<query>   -> HTML page embedding a ListItem JSON array
@@ -26,13 +28,25 @@ private data class SearchHit(
 )
 
 // ---- narto edge playback API ----
+// Narto aggregates short-drama from MANY backends (shortmax, NetShort, StardustTV,
+// mydramawave, Hakuna Matata, montagehub, TikTok, GoodShort, JoyReels, narto-native).
+// Each work's direct_play_url/play_url/multi_resolutions therefore points to a DIFFERENT
+// host and may be an HLS playlist OR a direct MP4 file — so loadLinks must detect the
+// container type (M3U8 vs direct VIDEO) per link instead of assuming everything is HLS.
 private data class EdgeResponse(
     val ok: Boolean? = null,
     val message: String? = null,
     val canonical: String? = null,          // full canonical URL hint on slug_mismatch
-    @JsonProperty("direct_play_url") val directPlayUrl: String? = null, // master m3u8 (open)
+    @JsonProperty("direct_play_url") val directPlayUrl: String? = null, // may be HLS master OR direct MP4
     @JsonProperty("play_url") val playUrl: String? = null,
+    @JsonProperty("multi_resolutions") val multiResolutions: List<EdgeResolution>? = null,
     @JsonProperty("multi_subtitles") val multiSubtitles: List<EdgeSub>? = null,
+)
+
+private data class EdgeResolution(
+    val resolution: Int? = null,
+    val label: String? = null,
+    @JsonProperty("stream_url") val streamUrl: String? = null,
 )
 
 private data class EdgeSub(
@@ -62,6 +76,32 @@ class NartoDramaProvider : MainAPI() {
 
     // The video-serve origin we must present to the edge/stream endpoints.
     private val nartoOrigin = "https://narto-drama.com"
+
+    // SITE'S CHANGING LINK (native "setting"): every request is built from `mainUrl`, which is an
+    // open OVERRIDE var. In CloudStream the user can change the base link from the provider
+    // settings screen by cloning Narto Drama and editing its URL — that is how the site's
+    // ever-changing mirror (currently edge.narto-drama.com, previously narto-drama.com) is kept
+    // up to date without touching code. All playback links are emitted directly from the API so a
+    // move to another mirror keeps working.
+
+    // Detect whether a stream URL is an HLS playlist (M3U8) or a direct single video file (MP4).
+    // Narto serves BOTH from different backends, and CloudStream must get the right link type or
+    // it will refuse/garble playback (an MP4 handed as M3U8 -> parse error, the "doesn't play" bug).
+    private suspend fun inferStreamType(url: String): ExtractorLinkType {
+        val lower = url.lowercase()
+        if (lower.contains("mime_type=video_mp4") || lower.endsWith(".mp4")) return ExtractorLinkType.VIDEO
+        if (lower.contains(".m3u8") || lower.contains("/e/m/") || lower.contains("/e/s/")
+            || lower.contains("/main.m3u8")) return ExtractorLinkType.M3U8
+        // Ambiguous (e.g. token-style montagehub URLs with no extension) -> probe Content-Type.
+        return try {
+            val r = app.head(url, headers = mapOf("User-Agent" to UA), referer = nartoOrigin)
+            val ct = r.headers["Content-Type"]?.lowercase() ?: ""
+            if (ct.contains("mpegurl") || ct.contains("hls") || ct.contains("apple")) ExtractorLinkType.M3U8
+            else ExtractorLinkType.VIDEO
+        } catch (e: Exception) {
+            ExtractorLinkType.M3U8
+        }
+    }
 
     // ---- Parse the ListItem JSON array embedded in a /search HTML page ----
     private fun parseSearchItems(html: String): List<SearchHit> {
@@ -206,48 +246,56 @@ class NartoDramaProvider : MainAPI() {
                 try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
             }
 
-            // 2) the video — direct master playlist (open mydramawave host)
-            val vUrl = edge.directPlayUrl?.takeIf { it.isNotBlank() }
-                ?: edge.playUrl?.takeIf { it.isNotBlank() }
-                ?: return false
+            // 2) the video — Narto aggregates from many backends, so a work can carry:
+            //      a) multi_resolutions -> the full 1080/720/480 quality set (per-resolution URLs)
+            //      b) a single play_url / direct_play_url (HLS master/media, or a direct MP4 file)
+            // We emit EVERY distinct URL with its correct container type so the right link plays.
+            val emitted = LinkedHashSet<String>()
+            var any = false
 
-            val streamText = try { app.get(vUrl, referer = nartoOrigin).text } catch (e: Exception) { "" }
-
-            if (streamText.contains("#EXT-X-STREAM-INF")) {
-                // master playlist => one link, player adapts across all available qualities + muxes audio
+            suspend fun emit(u: String, label: String, q: String) {
+                if (u.isBlank() || !emitted.add(u)) return
+                val type = inferStreamType(u)
                 callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "Full HD (كل الجودات)",
-                        url = vUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = nartoOrigin
-                        quality = getQualityFromName("1080p")
-                        headers = mapOf("Referer" to nartoOrigin)
-                    }
-                )
-            } else {
-                val q = when {
-                    vUrl.contains("1080p") -> "1080p"
-                    vUrl.contains("720p") -> "720p"
-                    vUrl.contains("480p") -> "480p"
-                    else -> "480p"
-                }
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = q,
-                        url = vUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
+                    newExtractorLink(source = name, name = label, url = u, type = type) {
                         referer = nartoOrigin
                         quality = getQualityFromName(q)
                         headers = mapOf("Referer" to nartoOrigin)
                     }
                 )
+                any = true
             }
-            true
+
+            val resolutions = edge.multiResolutions.orEmpty()
+                .filter { !it.streamUrl.isNullOrBlank() }
+            if (resolutions.isNotEmpty()) {
+                // Several "resolutions" often share ONE master/proxy URL — group by actual URL so
+                // we don't emit the same link 3 times, then surface each distinct source as its own
+                // playable quality (this is the "more than one link" the user wants to see).
+                val byUrl = linkedMapOf<String, MutableList<String>>()
+                for (r in resolutions) {
+                    val u = r.streamUrl!!
+                    byUrl.getOrPut(u) { mutableListOf() }
+                        .add(r.label ?: "${r.resolution ?: 480}p")
+                }
+                for ((u, labels) in byUrl) {
+                    val label = if (labels.size == 1) labels[0] else labels.joinToString("/")
+                    val res = resolutions.firstOrNull { it.streamUrl == u }?.resolution
+                    val q = when (res) {
+                        1080 -> "1080p"
+                        720 -> "720p"
+                        540 -> "540p"
+                        else -> "480p"
+                    }
+                    emit(u, label, q)
+                }
+            } else {
+                // Fallback: single link(s). Emit the raw source AND the local proxy variant
+                // (deduped) for redundancy — one of the two is what the web player actually uses.
+                for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
+            }
+
+            any
         } catch (e: Exception) {
             false
         }
