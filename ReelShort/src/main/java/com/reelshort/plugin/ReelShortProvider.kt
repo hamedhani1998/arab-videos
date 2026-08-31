@@ -111,10 +111,6 @@ class ReelShortProvider : MainAPI() {
         "th" to "التايلاندية", "tr" to "التركية",
     )
 
-    private suspend fun loadNextData(path: String): JsonNode? = try {
-        extractNextData(app.get("$mainUrl$path", headers = mapOf("User-Agent" to UA), referer = mainUrl).text)
-    } catch (e: Exception) { null }
-
     // بناء رابط المسلسل بالشكل الجديد /ar/movie/{slug}-{id} — الموقع أصبح يرفض الرابط بدون slug (301)
     private fun moviePath(title: String, id: String): String {
         val slug = java.net.URLEncoder.encode(title.trim().replace(" ", "-"), "UTF-8")
@@ -151,8 +147,8 @@ class ReelShortProvider : MainAPI() {
 
         val all = mutableListOf<SearchResponse>()
 
-        // محاولة 1: __NEXT_DATA__ - البحث عن books في كل الـ fallback
-        val root = loadNextData(path)
+        // محاولة 1: __NEXT_DATA__ من نفس الرد المُجلب (بدون طلب ثانٍ)
+        val root = extractNextData(html)
         if (root != null) {
             val fallback = root.get("props")?.get("pageProps")?.get("fallback")
             if (fallback != null) {
@@ -198,8 +194,8 @@ class ReelShortProvider : MainAPI() {
         val searchPath = "/ar/search?keywords=$q&type=movies"
         val html = try { app.get("$mainUrl$searchPath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text } catch (e: Exception) { "" }
 
-        // محاولة 1: __NEXT_DATA__
-        val root = loadNextData(searchPath)
+        // محاولة 1: __NEXT_DATA__ من نفس الرد المُجلب (بدون طلب ثانٍ)
+        val root = extractNextData(html)
         if (root != null) {
             val data = root.get("props")?.get("pageProps")
             if (data != null) {
@@ -238,7 +234,7 @@ class ReelShortProvider : MainAPI() {
         val res = try {
             app.get("$mainUrl/ar/movie/$moviePath", headers = mapOf("User-Agent" to UA), referer = mainUrl).text
         } catch (e: Exception) { "" }
-        val root = loadNextData("/ar/movie/$moviePath") ?: return null
+        val root = extractNextData(res) ?: return null
         val data = root.get("props")?.get("pageProps")?.get("data") ?: return null
         val title = textOrNull(data, "book_title") ?: return null
         val cover = textOrNull(data, "book_pic")
@@ -268,7 +264,7 @@ class ReelShortProvider : MainAPI() {
         val vttEpisodes = episodes.filter { isVttFamily(it.videoPic) }
         if (vttEpisodes.isNotEmpty()) {
             val eps = vttEpisodes.map { e ->
-                val data0 = "${e.videoPic ?: ""}||${e.serialNumber}"
+                val data0 = "0||${e.videoPic ?: ""}||${e.serialNumber}||"
                 newEpisode(data0) {
                     episode = e.serialNumber
                     name = "الحلقة ${e.serialNumber}"
@@ -280,12 +276,20 @@ class ReelShortProvider : MainAPI() {
             }
         }
 
-        // حالة 2: حلقات بدون VTT - نبحث عن رابط تشغيل (المقدمة trailer) في صفحة الفيلم
+        // حالة 2: حلقات بدون VTT - لكل حلقة صفحة خاصة بها تحمل رابط فيديو الحلقة الفعلية
         if (episodes.isNotEmpty()) {
+            // تجميع روابط صفحات الحلقات من صفحة الفيلم نفسها (كل حلقة لها contentUrl خاص فيها)
+            val epUrlRe = Regex("""/ar/episodes/episode-(\d+)-([^"'\\]+?)-([a-z0-9]{8,})-([a-z0-9]+)""")
+            val epUrlBySerial = HashMap<Int, String>()
+            for (m in epUrlRe.findAll(res)) {
+                val n = m.groupValues[1].toIntOrNull() ?: continue
+                epUrlBySerial[n] = "$mainUrl${m.groupValues[0]}"
+            }
             val trailer = extractTrailerM3u8(res)
             val eps = episodes.map { e ->
-                // data: videoPic||serialNumber||trailer — للعروض القديمة نمرر المقدمة كحتوي قابل للتشغيل
-                val data0 = "${e.videoPic ?: ""}||${e.serialNumber}||${trailer ?: ""}"
+                val epUrl = epUrlBySerial[e.serialNumber] ?: ""
+                // data: 1||episodePageUrl||serialNumber||trailer — للعروض القديمة نجلب فيديو الحلقة من صفحتها
+                val data0 = "1||$epUrl||${e.serialNumber}||${trailer ?: ""}"
                 newEpisode(data0) {
                     episode = e.serialNumber
                     name = "الحلقة ${e.serialNumber}"
@@ -306,43 +310,97 @@ class ReelShortProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // data format: "videoPic||serialNumber" أو "videoPic||serialNumber||trailer"
+        // data format: "family||[...]||serialNumber||[trailer]"
+        //   VTT family:  0||videoPic||serialNumber||          → master 3 جودات + ترجمات
+        //   old-VOD:     1||episodePageUrl||serialNumber||trailer → فيديو الحلقة من صفحتها، وإلا المقدمة
         val parts = data.split("||")
-        if (parts.size < 2) return false
-        val videoPic = parts[0]
-        val serialNumber = parts[1]
-        val trailer = if (parts.size >= 3) parts[2] else ""
+        if (parts.size < 3) return false
+        val family = parts[0]
+        val payload = parts[1]
+        val serialNumber = parts[2]
+        val trailer = if (parts.size >= 4) parts[3] else ""
 
-        // حالة العروض القديمة: لا يوجد مقطع قابل للتشغيل لكل حلقة، نعرض المقدمة
-        if (trailer.isNotBlank() && !isVttFamily(videoPic)) {
-            callback(
-                newExtractorLink(name, "ReelShort $serialNumber (مقدمة)", trailer, ExtractorLinkType.M3U8) {
-                    referer = mainUrl
-                    quality = getQualityFromName("1080p")
-                }
-            )
-            return true
+        // العروض القديمة: كل حلقة لها صفحة تحمل فيديو الحلقة الفعلي (video_url)
+        if (family == "1") {
+            if (payload.isNotBlank()) {
+                try {
+                    val html = app.get(payload, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+                    val root = extractNextData(html)
+                    val d = root?.get("props")?.get("pageProps")?.get("data")
+                    val videoUrl = d?.get("video_url")?.takeIf { it.isTextual && it.asText().startsWith("http") }?.asText()
+                    if (!videoUrl.isNullOrBlank()) {
+                        callback(
+                            newExtractorLink(name, "ReelShort $serialNumber", videoUrl, ExtractorLinkType.M3U8) {
+                                referer = mainUrl
+                                quality = getQualityFromName("1080p")
+                            }
+                        )
+                        return true
+                    }
+                } catch (e: Exception) {}
+            }
+            // احتياطي: عند فشل صفحة الحلقة نعرض المقدمة إن وجدت
+            if (trailer.isNotBlank()) {
+                callback(
+                    newExtractorLink(name, "ReelShort $serialNumber (مقدمة)", trailer, ExtractorLinkType.M3U8) {
+                        referer = mainUrl
+                        quality = getQualityFromName("1080p")
+                    }
+                )
+                return true
+            }
+            return false
         }
 
-        if (videoPic.isNotBlank() && isVttFamily(videoPic)) {
-            val master = vttMasterUrl(videoPic) ?: return false
+        if (family == "0" && payload.isNotBlank()) {
+            val master = vttMasterUrl(payload) ?: return false
             return try {
                 val masterText = app.get(master, headers = mapOf("User-Agent" to UA), referer = mainUrl).text
+                // الماستر يوفر 3 جودات (540p/720p/1080p) + ترجمات متعددة — نعرض كل الجودات
+                var found = false
+                val streamRe = Regex("""RESOLUTION=(?:(\d+)x(\d+))[^,]*""")
+                var streamIdx = 0
+                val variantLines = masterText.split("\n")
+                val depth = "\t".repeat(1)
+                for ((i, line) in variantLines.withIndex()) {
+                    if (line.startsWith("#EXT-X-STREAM-INF")) {
+                        streamIdx++
+                        val next = variantLines.getOrNull(i + 1)?.trim() ?: continue
+                        val resMatch = streamRe.find(line)
+                        val res = resMatch?.groupValues?.get(2) ?: continue
+                        val qLabel = when (res) {
+                            "540" -> "540p"
+                            "720" -> "720p"
+                            else -> "1080p"
+                        }
+                        val uri = if (next.startsWith("http")) next else master.substringBeforeLast("/") + "/" + next
+                        callback(newExtractorLink(name, "ReelShort $serialNumber ($qLabel)", uri, ExtractorLinkType.M3U8) {
+                            referer = mainUrl
+                            quality = getQualityFromName(qLabel)
+                        })
+                        found = true
+                    }
+                }
+                if (found) {
+                    // الترجمات من نفس الماستر
+                    val subRegex = Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES[^>]*NAME="([^"]+)"[^>]*URI="([^"]+)"""")
+                    for (m in subRegex.findAll(masterText)) {
+                        val lang = m.groupValues[1]
+                        val uri = m.groupValues[2]
+                        val subUrl = if (uri.startsWith("http")) uri else master.substringBeforeLast("/") + "/" + uri
+                        val cleanLang = when (lang) {
+                            "Arabic", "MSA" -> "ar"
+                            else -> lang.lowercase().take(2)
+                        }
+                        try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
+                    }
+                    return true
+                }
+                // احتياطي: إرجاع الماستر نفسه إن لم تُحلل الجودات
                 callback(newExtractorLink(name, "ReelShort $serialNumber", master, ExtractorLinkType.M3U8) {
                     referer = mainUrl
                     quality = getQualityFromName("1080p")
                 })
-                val subRegex = Regex("""#EXT-X-MEDIA:TYPE=SUBTITLES[^>]*NAME="([^"]+)"[^>]*URI="([^"]+)"""")
-                for (m in subRegex.findAll(masterText)) {
-                    val lang = m.groupValues[1]
-                    val uri = m.groupValues[2]
-                    val subUrl = if (uri.startsWith("http")) uri else master.replaceAfterLast("/", uri)
-                    val cleanLang = when (lang) {
-                        "Arabic", "MSA" -> "ar"
-                        else -> lang.lowercase().take(2)
-                    }
-                    try { subtitleCallback(newSubtitleFile(cleanLang, subUrl)) } catch (_: Exception) {}
-                }
                 true
             } catch (e: Exception) { false }
         }
