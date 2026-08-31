@@ -53,7 +53,7 @@ class OnShortProvider : MainAPI() {
 
     // تذكرة جلستنا المؤقتة لكل مسلسل (نعيد استخدامها لتشغيل عدة حلقات دون إعادة جلب)
     private class PlayCache(val ref: String, val postId: String, val ticket: String)
-    private var cached: PlayCache? = null
+    @Volatile private var cached: PlayCache? = null
 
     private fun headers() = mapOf(
         "User-Agent" to ONS_UA,
@@ -170,7 +170,11 @@ class OnShortProvider : MainAPI() {
         return try {
             val meta = parseMeta(url)
             // إن وُجدت بيانات مضمّنة نبني الحلقات فورًا (سريع، بلا شبكة، بلا أخطاء)
-            if (meta != null) return buildFromMeta(meta, url)
+            // وفي الخلفية نجلب التذكرة (ticket) لنحفظها مؤقتًا حتى يعمل التشغيل فورًا.
+            if (meta != null) {
+                prefetchTicket(url)
+                return buildFromMeta(meta, url)
+            }
 
             // احتياطي: رابط بدون بيانات (مقابل روابط قديمة أو مشاركة) — نجلب صفحة التفاصيل
             val res = getWithRetry(stripMeta(url), mainUrl, headers()) ?: return null
@@ -280,6 +284,30 @@ class OnShortProvider : MainAPI() {
             }
             true
         } catch (e: Exception) { false }
+    }
+
+    // نجلب التذكرة في الخلفية (Thread عادي + HttpURLConnection لأن kotlinx.coroutines غير متاحة)
+    // فنحفظها مؤقتًا قبل أن يضغط المستخدم على التشغيل؛ وإن فشل هذا فلا يتأثر فتح التفاصيل.
+    private fun prefetchTicket(url: String) {
+        val base = stripMeta(url)
+        if (cached?.ref == base) return
+        Thread {
+            try {
+                val conn = java.net.URL(base).openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("User-Agent", ONS_UA)
+                conn.setRequestProperty("Referer", mainUrl)
+                conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*")
+                conn.connectTimeout = 20000
+                conn.readTimeout = 25000
+                val page = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val postId = detailPostRe.find(page)?.groupValues?.get(1)
+                val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
+                if (postId != null && ticket != null) cached = PlayCache(base, postId, ticket)
+            } catch (_: Exception) {
+                // فشل الجلب الخلفي — سيتعامل معه loadLinks عند الحاجة
+            }
+        }.start()
     }
 
     // يحلّ (postId، ticket) من المرجع: إما "postId|ticket" أو رابط صفحة التفاصيل.
