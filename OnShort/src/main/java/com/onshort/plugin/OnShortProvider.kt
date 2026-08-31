@@ -47,8 +47,20 @@ class OnShortProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
+    // الواجهة الرئيسية: صف لكل منصة من المنصات التي يجمعها الموقع،
+    // بحيث تظهر مسلسلات كل منصة مضمّنة في قسمها المخصص.
+    // المفتاح = اسم المنصة كما يظهر في رابط /ar/platform/{slug}/.
+    private val platformRows = listOf(
+        "shortmax" to "أحدث مسلسلات ShortMax",
+        "netshort" to "أحدث مسلسلات NetShort",
+        "reelshort" to "أحدث مسلسلات ReelShort",
+        "dramawave" to "أحدث مسلسلات DramaWave",
+        "idrama" to "أحدث مسلسلات iDrama",
+        "goodshort" to "أحدث مسلسلات GoodShort",
+    )
+
     override val mainPage = mainPageOf(
-        "latest" to "أحدث المسلسلات",
+        *platformRows.map { (slug, label) -> slug to label }.toTypedArray()
     )
 
     // تذكرة جلستنا المؤقتة لكل مسلسل (مفتاح = postId)
@@ -129,11 +141,13 @@ class OnShortProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            val base = "$ONS_API/listing?page=${maxOf(page, 1)}&per_page=12&lang=ar"
-            val resp = getWithRetry(base, mainUrl, headers()) ?: return null
-            val node = mapper.readTree(resp)
-            val html = node.get("html")?.asText() ?: return null
-            val items = parseListingHtml(html, java.util.HashSet())
+            // request.data = مفتاح الصف = slug المنصة (shortmax/netshort/…)
+            val slug = request.data
+            val p = maxOf(page, 1)
+            val url = if (p == 1) "$ONS_MAIN/platform/$slug/"
+                else "$ONS_MAIN/platform/$slug/page/$p/"
+            val resp = getWithRetry(url, mainUrl, headers()) ?: return null
+            val items = parseListingHtml(resp, java.util.HashSet())
             if (items.isEmpty()) null
             else newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
@@ -222,22 +236,33 @@ class OnShortProvider : MainAPI() {
     }
 
     // نجلب التذكرة في الخلفية (Thread + HttpURLConnection; kotlinx غير متاح) لنحفظها مؤقتًا.
-    // إن فشل الجلب الخلفي لا يتأثر فتح التفاصيل؛ loadLinks سيعيد المحاولة.
+    // التذكرة خاصة بكل مسلسل وتأتي من الصفحة البطيئة ?p={postId} (~10s وتحت التقييد أبطأ).
+    // التشغيل يحدث داخل نافذة زمنية قصيرة في التطبيق، لذا نعيد المحاولة في الخلفية حتى نضمن
+    // وصولها قبل أن يضغط المستخدم على تشغيل (بدلًا من انتظارها في loadLinks وتجاوز المهلة → "لايوجد روابط").
     private fun prefetchTicket(postId: String) {
         if (cached?.postId == postId) return
+        val deadline = System.currentTimeMillis() + 30000
         Thread {
-            try {
-                val conn = java.net.URL(detailUrl(postId)).openConnection() as java.net.HttpURLConnection
-                conn.requestMethod = "GET"
-                conn.setRequestProperty("User-Agent", ONS_UA)
-                conn.setRequestProperty("Referer", mainUrl)
-                conn.connectTimeout = 20000
-                conn.readTimeout = 25000
-                val page = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
-                if (ticket != null) cached = PlayCache(postId, ticket)
-            } catch (_: Exception) {
-                // loadLinks يتعامل مع الحالة عند الحاجة
+            var attempt = 0
+            while (cached?.postId != postId && System.currentTimeMillis() < deadline) {
+                attempt++
+                try {
+                    val conn = java.net.URL(detailUrl(postId)).openConnection() as java.net.HttpURLConnection
+                    conn.requestMethod = "GET"
+                    conn.setRequestProperty("User-Agent", ONS_UA)
+                    conn.setRequestProperty("Referer", mainUrl)
+                    conn.connectTimeout = 15000
+                    conn.readTimeout = 18000
+                    val page = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
+                    if (ticket != null) cached = PlayCache(postId, ticket)
+                    else break // الصفحة لم تتضمن تذكرة — لا جدوى من الإعادة
+                } catch (_: Exception) {
+                    // 502/504/مهلة — أعد المحاولة بفاصل قصير
+                }
+                if (cached?.postId != postId && System.currentTimeMillis() < deadline) {
+                    try { Thread.sleep(1500L) } catch (_: InterruptedException) {}
+                }
             }
         }.start()
     }
