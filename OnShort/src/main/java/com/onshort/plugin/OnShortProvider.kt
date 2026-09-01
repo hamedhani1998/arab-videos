@@ -59,23 +59,27 @@ class OnShortProvider : MainAPI() {
     // تحقّقت أغسطس 2026). ملاحظة: حتى لو توفّرت بطاقات منصة، قد لا يُشغّلها مشغّلُ الموقع نفسُه
     // (يرجع "Provider is not handled by REST bridge" مثل NetShort/StoryReel/DramaBite/VibeShort) —
     // هذا قيدٌ من جهة السيرفر، وليس خطأً في الإضافة.
+    // ترتيب: المنصات العاملة فعليًا عبر OnShort أولًا (10)، ثم المنصات الست المرفوضة
+    // من سيرفر OnShort نفسه (لا يمكن تشغيلها عبره) في نهاية القائمة، مع توجيهٍ
+    // إلى مزودها المستقل (NetShort/ShortTV مشغَّلة أصلًا في التطبيق).
     private val platformRows = listOf(
-        "shortmax" to "أحدث مسلسلات ShortMax",
-        "netshort" to "أحدث مسلسلات NetShort",
         "reelshort" to "أحدث مسلسلات ReelShort",
         "dramabox" to "أحدث مسلسلات DramaBox",
-        "goodshort" to "أحدث مسلسلات GoodShort",
         "idrama" to "أحدث مسلسلات iDrama",
         "dramawave" to "أحدث مسلسلات DramaWave",
         "flextv" to "أحدث مسلسلات FlexTV",
         "freereels" to "أحدث مسلسلات FreeReels",
-        "dramabite" to "أحدث مسلسلات DramaBite",
         "microdrama" to "أحدث مسلسلات MicroDrama",
         "moborels" to "أحدث مسلسلات MoBorels",
         "shortswave" to "أحدث مسلسلات ShortsWave",
         "stardusttv" to "أحدث مسلسلات StardustTV",
-        "storyreel" to "أحدث مسلسلات StoryReel",
-        "vibeshort-goodbos" to "أحدث مسلسلات VibeShort",
+        // ————— غير متاحة عبر OnShort (مرفوضة من سيربره) — تصل عبر مزود مستقل —————
+        "netshort" to "NetShort (مزود مستقل)",
+        "shortmax" to "ShortMax (مزود مستقل)",
+        "goodshort" to "GoodShort (غير متاح)",
+        "dramabite" to "DramaBite (غير متاح)",
+        "storyreel" to "StoryReel (غير متاح)",
+        "vibeshort-goodbos" to "VibeShort (غير متاح)",
     )
 
     override val mainPage = mainPageOf(
@@ -644,9 +648,10 @@ class OnShortProvider : MainAPI() {
     private fun rejectReason(node: JsonNode?): String {
         val msg = node?.get("message")?.asText() ?: return ""
         return when {
-            msg.contains("REST bridge") || msg.contains("not handled") -> "المنصة غير مدعومة في OnShort (خادم الموقع نفسه يرفضها)"
-            msg.contains("session expired") || msg.contains("401") -> "انتهت جلسة التذكرة — حاول مرة أخرى"
-            msg.contains("refresh failed") -> msg
+            msg.contains("REST bridge") || msg.contains("not handled") ->
+                "هذه المنصة مرفوضة من خادم OnShort نفسه. متاحة عبر مزودها المستقل من التطبيق (NetShort / ShortTV / ReelShort)."
+            msg.contains("session expired") -> "انتهت جلسة التذكرة — حاول مرة أخرى"
+            msg.contains("refresh failed") -> "مصدر المنصة لا يستجيب حاليًا (401 على المصدر الأصلي)"
             else -> msg
         }
     }
