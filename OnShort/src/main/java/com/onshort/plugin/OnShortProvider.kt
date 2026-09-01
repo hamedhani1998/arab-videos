@@ -85,6 +85,9 @@ class OnShortProvider : MainAPI() {
     // تذكرة جلستنا المؤقتة لكل مسلسل (مفتاح = postId)
     private class PlayCache(val postId: String, val ticket: String)
     @Volatile private var cached: PlayCache? = null
+    // ذاكرة تخزين مؤقت للبحث: الاستعلامات المتكررة تعود فورًا دون لمس السيرفر البطيء/المحدود.
+    // خريطة query -> (millis, النتائج). نُعيده فقط إذا كان قديمًا بأقل من 5 دقائق.
+    @Volatile private var searchCache: MutableMap<String, Pair<Long, List<SearchResponse>>>? = null
     // خيط الجلب الخلفي الحالي — حتى ينتظر loadLinks عليه بدلًا من إعادة جلب الصفحة البطيئة
     @Volatile private var prefetchThread: Thread? = null
 
@@ -184,10 +187,18 @@ class OnShortProvider : MainAPI() {
 
     // ---------- البحث ----------
     override suspend fun search(query: String): List<SearchResponse>? {
+        val key = query.trim().lowercase()
+        val now = System.currentTimeMillis()
+        // ردّ فوري إن كان الاستعلام نفسه نُفّذ قبل أقل من 5 دقائق (سيرفر OnShort بطيء/محدود السرعة)
+        val sc = searchCache?.get(key)
+        if (sc != null && now - sc.first < 300_000) return sc.second
         return try {
             val q = URLEncoder.encode(query, "UTF-8")
-            val base = "$ONS_API/search?q=$q&limit=48&lang=ar"
-            val text = getWithRetry(base, mainUrl, headers()) ?: return null
+            // limit أصغر = استجابة أسرع (السيرفر يحدّ السرعة). 24 كافية للبحث.
+            val base = "$ONS_API/search?q=$q&limit=24&lang=ar"
+            // جولة أولى فورية: أردّ فأرةً واحدة app.get بدون انتظار backoff (سريع إدراكيًا)
+            // لا نستخدم getWithRetry هنا — الاستدعاء الأول يعود فورًا، وإن فشل نعيده مرة.
+            val text = timeFirstSearch(base) ?: return null
             val node = mapper.readTree(text)
             val arr = node.get("results") ?: return emptyList()
             val out = mutableListOf<SearchResponse>()
@@ -206,8 +217,25 @@ class OnShortProvider : MainAPI() {
                     if (total > 1) this.episodes = total
                 })
             }
+            // خزّن النتيجة حتى لا يعيد لمس السيرفر ببطء
+            if (searchCache == null) searchCache = java.util.concurrent.ConcurrentHashMap()
+            searchCache!![key] = now to out
             out
         } catch (e: Exception) { null }
+    }
+
+    // استدعاء بحث واحد فوري (بدون backoff بين المحاولات): نجرب app.get مرة، وإن فشل نعيد مرة واحدة.
+    private suspend fun timeFirstSearch(url: String): String? {
+        try {
+            val t = app.get(url, referer = mainUrl, headers = headers()).text
+            if (!t.isNullOrBlank()) return t
+        } catch (_: Exception) {}
+        try { Thread.sleep(300L) } catch (_: InterruptedException) {}
+        try {
+            val t = app.get(url, referer = mainUrl, headers = headers()).text
+            if (!t.isNullOrBlank()) return t
+        } catch (_: Exception) {}
+        return null
     }
 
     // ---------- التفاصيل (load) ----------
