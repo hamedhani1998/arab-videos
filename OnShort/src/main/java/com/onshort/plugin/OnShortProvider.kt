@@ -319,9 +319,10 @@ class OnShortProvider : MainAPI() {
             // تشغيلُها يؤدي إلى صمتٍ تام (لا يوجد صوت). master فقط هو المضمون السليم صوتيًا.
             val main = node.get("url")?.asText()
             if (!main.isNullOrBlank()) {
+                // يُفضَّل تركه متكيّفًا (لا نُثبّت جودة) حتى يختار المشغّل الجودة الأنسب
                 val q = node.get("quality")?.asText() ?: "auto"
                 callback(newExtractorLink(name, "${q} · Auto", main, ExtractorLinkType.M3U8) {
-                    this.quality = getQualityFromName("1080")
+                    this.quality = getQualityFromName(q.takeIf { it.isNotBlank() } ?: "1080")
                     this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                 })
             }
