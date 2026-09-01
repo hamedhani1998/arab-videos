@@ -48,6 +48,10 @@ class OnShortProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
+    // تشخيص: سجّل إلى logcat (android.util.Log متاح دائمًا على Android).
+    private fun logD(msg: String) { try { android.util.Log.d("OnShort", msg) } catch (_: Exception) {} }
+    private fun logE(msg: String) { try { android.util.Log.e("OnShort", msg) } catch (_: Exception) {} }
+
     // الواجهة الرئيسية: صف لكل منصة من المنصات التي يجمعها الموقع،
     // بحيث تظهر مسلسلات كل منصة مضمّنة في قسمها المخصص.
     // المفتاح = اسم المنصة كما يظهر في رابط /ar/platform/{slug}/.
@@ -297,8 +301,9 @@ class OnShortProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
+            logD("OnShort.loadLinks data='$data'")
             val parts = data.split("|")
-            if (parts.size != 2) return false
+            if (parts.size != 2) { logD("OnShort.loadLinks bad data size=${parts.size}"); return false }
             val postId = parts[0]
             val ep = parts[1].toIntOrNull() ?: return false
 
@@ -306,10 +311,11 @@ class OnShortProvider : MainAPI() {
             // fetchEpisode يبني التذكرة بنفسه من استجابة التشغيل (بدون صفحة ?p= البطيئة)
             // حتى لا تتجاوز مهلة loadLinks القصيرة في التطبيق → "لايوجد روابط".
             val cachedTicket = cached?.takeIf { it.postId == postId }?.ticket
+            logD("OnShort.loadLinks post=$postId ep=$ep cachedTicket=${cachedTicket?.isNotBlank() == true}")
 
-            val node = fetchEpisode(postId, ep, cachedTicket) ?: return false
+            val node = fetchEpisode(postId, ep, cachedTicket) ?: run { logD("OnShort.loadLinks fetchEpisode null -> false"); return false }
 
-            if (node.has("error") || node.get("ok")?.asBoolean(false) == false) return false
+            if (node.has("error") || node.get("ok")?.asBoolean(false) == false) { logD("OnShort.loadLinks ok=false -> false"); return false }
 
             // الصوت (مهم): HLS الخاص بـ OnShort يستخدم صوتًا مستقلاً (independent audio) —
             // الفيديو في نسخ منفصلة والصوت في مجموعة #EXT-X-MEDIA:TYPE=AUDIO منفصلة.
@@ -405,6 +411,7 @@ class OnShortProvider : MainAPI() {
                 conn.connectTimeout = 15000
                 conn.readTimeout = 25000
                 val code = conn.responseCode
+                logD("OnShort.play http=$code (attempt=$attempt)")
                 // اقرأ الجسم الخام من تدفق النجاح أو الخطأ (403/5xx) على حد سواء
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
                 val bytes = stream?.readBytes() ?: ByteArray(0)
@@ -420,14 +427,19 @@ class OnShortProvider : MainAPI() {
                 } else {
                     String(bytes, Charsets.UTF_8)
                 }
-                val node = mapper.readTree(raw)
-                if (node != null) return node
-            } catch (_: Exception) {
+                val node = try { mapper.readTree(raw) } catch (e: Exception) {
+                    logE("OnShort.rawGetJson parse failed: ${e.message} | body=${raw.take(80)}")
+                    null
+                }
+                if (node != null) { logD("OnShort.rawGetJson ok, has_ticket=${node["ticket"]?.isTextual == true}"); return node }
+            } catch (e: Exception) {
                 // 502/504/مهلة — أعد المحاولة
+                logE("OnShort.rawGetJson exception (attempt=$attempt): ${e.message}")
             }
             attempt++
             if (attempt < 3) try { Thread.sleep(900L * attempt) } catch (_: InterruptedException) {}
         }
+        logE("OnShort.rawGetJson returning null after retries")
         return null
     }
 
@@ -444,10 +456,14 @@ class OnShortProvider : MainAPI() {
             // نبدأ منها (boootstrap سريع — لا حاجة لصفحة ?p= البطيئة التي كانت تسبب المهلة).
             val hdrs = mutableMapOf("X-ONShort-Player" to "1") // مطلوب بشدة
             if (!current.isNullOrBlank()) hdrs["X-ONShort-Ticket"] = current
-            val node = rawGetJson(u, mainUrl, hdrs) ?: return null
+            val node = rawGetJson(u, mainUrl, hdrs) ?: run {
+                logD("OnShort.fetchEpisode null at attempt=$attempt")
+                return null
+            }
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
+            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=${newTicket != null} url=${node.get("url")?.asText().orEmpty().take(60)}")
             if (!ok) {
                 // تذكرة غير صالحة/منتهية: أعد المحاولة فورًا بالتذكرة الجديدة من الجسم
                 if (newTicket != null && attempt < 3) continue
