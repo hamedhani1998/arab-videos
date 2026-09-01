@@ -1,4 +1,4 @@
-/build/
+build/
 .gradle/
 .kotlin/
 .tmp_capture/

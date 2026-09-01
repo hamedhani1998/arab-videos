@@ -1,7 +1,0 @@
-com.arbada.plugin.Arbada-pngs-0 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\build\generated\res\pngs\release
-com.arbada.plugin.Arbada-resValues-1 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\build\generated\res\resValues\release
-com.arbada.plugin.Arbada-mergeReleaseResources-2 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\build\intermediates\incremental\release\mergeReleaseResources\merged.dir
-com.arbada.plugin.Arbada-mergeReleaseResources-3 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\build\intermediates\incremental\release\mergeReleaseResources\stripped.dir
-com.arbada.plugin.Arbada-release-4 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\build\intermediates\merged_res\release\mergeReleaseResources
-com.arbada.plugin.Arbada-main-5 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\src\main\res
-com.arbada.plugin.Arbada-release-6 C:\Users\yemen\Desktop\cloudstream\TestPlugins\Arbada\src\release\res
