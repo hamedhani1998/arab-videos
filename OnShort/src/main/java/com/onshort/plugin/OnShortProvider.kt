@@ -388,37 +388,54 @@ class OnShortProvider : MainAPI() {
         return null
     }
 
-    // يقرأ جسم استجابة من شبكة أصلية ويعيده كـ JsonNode حتى لو كان HTTP 403
-    // (التذكرة المنتهية تُرجع 403 مع جسم {ok:false,retryable:true,ticket:يديدة} —
-    // يجب قراءة هذا الجسم لاستخراج التذكرة الجديدة بدلًا من اعتبارها فشلًا).
-    private fun rawGetJson(url: String, referer: String, extraHeaders: Map<String, String>): JsonNode? {
+    // يقرأ جسم استجابة من API التشغيل ويعيده كـ JsonNode مهما كان كود HTTP (403 يحمل تذكرة جديدة).
+    // نفضّل مسار CloudStream اللاتزامني app.get — نفس الطريقة التي يعتمدها مزوّدا ReelShort/DeepDrama
+    // العاملان — لأنه لا يحجب نافذة loadLinks القصيرة. وإن فشل (يرمي عند 403 أو لا يعطي جسمًا قابلًا
+    // للتحليل) نرجع إلى HttpURLConnection خام يقرأ الجسم من inputStream أو errorStream ويفكّ gzip يدويًا
+    // (خادم OnShort يضغط جسم 403؛ identity وحدها تمنع الضغط لكن نحتفظ بالمسارين احتياطيًا).
+    private suspend fun rawGetJson(url: String, referer: String, extraHeaders: Map<String, String>): JsonNode? {
+        val hdrs = HashMap<String, String>()
+        hdrs["User-Agent"] = ONS_UA
+        hdrs["Accept"] = "application/json, text/plain, */*"
+        hdrs["Accept-Encoding"] = "identity"
+        hdrs["Cache-Control"] = "no-cache, no-store"
+        hdrs["Pragma"] = "no-cache"
+        for ((k, v) in extraHeaders) hdrs[k] = v
+
+        // المسار 1 — CloudStream app.get (اللزامني). السريع ولا يحجب خيط loadLinks.
+        try {
+            val text = app.get(url, headers = hdrs, referer = referer).text
+            if (!text.isNullOrBlank()) {
+                val n = try { mapper.readTree(text) } catch (e: Exception) {
+                    logE("OnShort.rawGetJson(app) parse failed: ${e.message} | body=${text.take(80)}")
+                    null
+                }
+                if (n != null) {
+                    logD("OnShort.rawGetJson(app) ok, has_ticket=${n["ticket"]?.isTextual == true}")
+                    return n
+                }
+            } else {
+                logD("OnShort.rawGetJson(app) empty body")
+            }
+        } catch (e: Exception) {
+            logE("OnShort.rawGetJson(app) threw: ${e.message}")
+        }
+
+        // المسار 2 — احتياطي خام: يقرأ errorStream على 403/5xx ويفكّ gzip يدويًا.
         var attempt = 0
         while (attempt < 3) {
             try {
                 val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
-                conn.setRequestProperty("User-Agent", ONS_UA)
-                conn.setRequestProperty("Referer", referer)
-                conn.setRequestProperty("Accept", "application/json, text/plain, */*")
-                // حرج: نمنع ضغط gzip. Android's HttpURLConnection يطلب gzip تلقائيًا ويفكّه
-                // في inputStream (200) لكنه لا يفكّه في errorStream (403). وخادم OnShort يُرجع
-                // جسم 403 (الذي يحمل التذكرة الجديدة) مضغوطًا gzip → بدون هذا السطر يقرأ الكود
-                // ثنائيات مضغوطة ويفشل تحليل JSON → fetchEpisode يرجع null → "لم يعثر على روابط".
-                conn.setRequestProperty("Accept-Encoding", "identity")
-                conn.setRequestProperty("Cache-Control", "no-cache, no-store")
-                conn.setRequestProperty("Pragma", "no-cache")
-                for ((k, v) in extraHeaders) conn.setRequestProperty(k, v)
-                conn.connectTimeout = 15000
-                conn.readTimeout = 25000
+                for ((k, v) in hdrs) conn.setRequestProperty(k, v)
+                conn.connectTimeout = 12000
+                conn.readTimeout = 20000
                 val code = conn.responseCode
-                logD("OnShort.play http=$code (attempt=$attempt)")
-                // اقرأ الجسم الخام من تدفق النجاح أو الخطأ (403/5xx) على حد سواء
+                logD("OnShort.rawGetJson http=$code (attempt=$attempt)")
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
                 val bytes = stream?.readBytes() ?: ByteArray(0)
                 stream?.close()
                 conn.disconnect()
-                // حرج: خادم OnShort يُرجع جسم 403 (الذي يحمل التذكرة الجديدة) مضغوطًا gzip.
-                // Android قد لا يفكّ errorStream تلقائيًا، فنفكّه يدويًا إن بدأ بالـ magic (1f 8b).
                 val raw = if (bytes.size >= 2 && (bytes[0].toInt() and 0xff) == 0x1f && (bytes[1].toInt() and 0xff) == 0x8b) {
                     try {
                         java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(bytes))
@@ -428,16 +445,15 @@ class OnShortProvider : MainAPI() {
                     String(bytes, Charsets.UTF_8)
                 }
                 val node = try { mapper.readTree(raw) } catch (e: Exception) {
-                    logE("OnShort.rawGetJson parse failed: ${e.message} | body=${raw.take(80)}")
+                    logE("OnShort.rawGetJson(raw) parse failed: ${e.message} | body=${raw.take(80)}")
                     null
                 }
                 if (node != null) { logD("OnShort.rawGetJson ok, has_ticket=${node["ticket"]?.isTextual == true}"); return node }
             } catch (e: Exception) {
-                // 502/504/مهلة — أعد المحاولة
                 logE("OnShort.rawGetJson exception (attempt=$attempt): ${e.message}")
             }
             attempt++
-            if (attempt < 3) try { Thread.sleep(900L * attempt) } catch (_: InterruptedException) {}
+            if (attempt < 3) try { Thread.sleep(700L * attempt) } catch (_: InterruptedException) {}
         }
         logE("OnShort.rawGetJson returning null after retries")
         return null
