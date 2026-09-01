@@ -30,12 +30,12 @@ class SexAlArabProvider : MainAPI() {
                     val a = item.selectFirst("a") ?: return@mapNotNull null
                     val href = a.attr("href") ?: return@mapNotNull null
                     val title = item.selectFirst("strong.title")?.text()?.trim()
-                        ?: a.selectFirst("span.title")?.text()?.trim()
-                        ?: a.attr("title")
+                        ?: item.selectFirst("a span.title")?.text()?.trim()
+                        ?: a.attr("title") ?: return@mapNotNull null
                     val poster = item.selectFirst("img.thumb")?.let {
                         it.attr("data-original").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } }
                     }
-                    val rating = item.selectFirst("div.rating")?.text()?.trim()?.replace("%", "")
+                    val rating = item.selectFirst("div.rating")?.ownText()?.trim()
                     newMovieSearchResponse(title, href, TvType.NSFW) {
                         this.posterUrl = poster
                         if (!rating.isNullOrBlank()) this.score = Score.from(rating, 100)
@@ -54,8 +54,8 @@ class SexAlArabProvider : MainAPI() {
                     val a = item.selectFirst("a") ?: return@mapNotNull null
                     val href = a.attr("href") ?: return@mapNotNull null
                     val title = item.selectFirst("strong.title")?.text()?.trim()
-                        ?: a.selectFirst("span.title")?.text()?.trim()
-                        ?: a.attr("title")
+                        ?: item.selectFirst("a span.title")?.text()?.trim()
+                        ?: a.attr("title") ?: return@mapNotNull null
                     val poster = item.selectFirst("img.thumb")?.let {
                         it.attr("data-original").ifBlank { it.attr("data-src").ifBlank { it.attr("src") } }
                     }
@@ -68,13 +68,23 @@ class SexAlArabProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val doc = app.get(url, referer = mainUrl).document
-            val title = doc.selectFirst("h1")?.text()?.trim()
+
+            // og:title أولاً — عادةً اسم الفيلم الصافي؛ وبعدها h1 داخل المحتوى، مع تجاهل
+            // العنوان الأفقي (شعار الموقع) حتى لا يظهر "سكس العرب" كاسم للفيديو
+            val title = doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+                ?: doc.select("h1").firstOrNull {
+                    val t = it.text().trim()
+                    t.length > 2 && !t.contains("سكس العرب") && !t.contains("أحدث")
+                }?.text()?.trim()
+                ?: doc.selectFirst(".video-title h1, .title h1, article h1")?.text()?.trim()
                 ?: doc.selectFirst(".title, .htitle, .video-title")?.text()?.trim()
-                ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
-                ?: doc.title().substringBefore(" -").trim()
+                ?: doc.selectFirst("meta[itemprop=name]")?.attr("content")?.trim()
+                ?: doc.title().substringBefore(" - ").trim().ifBlank { "بدون عنوان" }
+
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             val description = doc.selectFirst("meta[name=description]")?.attr("content")
-            val tags = doc.select("meta[name=keywords]")?.attr("content")?.split(",")?.map { it.trim() }?.take(6)
+            val tags = doc.selectFirst("meta[name=keywords]")?.attr("content")?.split(",")?.map { it.trim() }?.take(6)
+
             newMovieLoadResponse(title, url, TvType.NSFW, url) {
                 this.posterUrl = poster
                 this.plot = description
@@ -91,17 +101,12 @@ class SexAlArabProvider : MainAPI() {
             val doc = app.get(data, referer = mainUrl).document
             var found = false
 
-            // Method 1: video source tags - PRIMARY METHOD
+            // Method 1: وسوم <video><source> — نظِّف الرابط أيضاً
             doc.select("video source").forEach { source ->
                 val url = source.attr("src")
                 val quality = source.attr("title")
                 if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = url,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
+                    callback(newExtractorLink(name, name, clean(url), ExtractorLinkType.VIDEO) {
                         this.referer = mainUrl
                         this.quality = getQualityFromName(quality.ifBlank { "360p" })
                     })
@@ -110,7 +115,9 @@ class SexAlArabProvider : MainAPI() {
             }
             if (found) return true
 
-            // Method 2: flashvars fallback
+            // Method 2: flashvars (video_url / video_alt_url / video_alt_url2)
+            // — الفهذه مشكلة ERRN_INVALID_URL: قيمة video_url تأتي مغلّفة بـ function/0/<base64>
+            // ويجب فكّها قبل إرسالها للمشغّل
             val allScript = doc.select("script").joinToString("\n") { it.data() }
             if (allScript.contains("flashvars")) {
                 val entries = listOf(
@@ -121,29 +128,48 @@ class SexAlArabProvider : MainAPI() {
                 for ((urlKey, textKey) in entries) {
                     val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
                     val quality = Regex("""$textKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
-                        ?: when(urlKey) { "video_url" -> "240p"; "video_alt_url" -> "360p"; else -> "480p" }
+                        ?: when (urlKey) { "video_url" -> "240p"; "video_alt_url" -> "360p"; else -> "480p" }
                     if (!url.isNullOrBlank()) {
-                        callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                            this.referer = mainUrl
-                            this.quality = getQualityFromName(quality)
-                        })
-                        found = true
+                        val decoded = clean(url)
+                        if (decoded.contains("get_file") || decoded.contains("function/") || decoded.startsWith("http")) {
+                            callback(newExtractorLink(name, name, decoded, ExtractorLinkType.VIDEO) {
+                                this.referer = mainUrl
+                                this.quality = getQualityFromName(quality)
+                            })
+                            found = true
+                        }
                     }
                 }
             }
             if (found) return true
 
-            // Method 3: iframe embed - use loadExtractor
+            // Method 3: iframe embed
             val iframe = doc.selectFirst("iframe[src]")
             if (iframe != null) {
-                val iframeUrl = iframe.attr("src")
-                if (iframeUrl.isNotBlank()) {
-                    loadExtractor(iframeUrl, mainUrl, subtitleCallback, callback)
-                    return true
-                }
+                loadExtractor(iframe.attr("src"), mainUrl, subtitleCallback, callback)
+                return true
             }
-
-            return false
+            return found
         } catch (e: Exception) { return false }
+    }
+
+    /**
+     * فكّ روابط `function/0/<base64>` إلى الرابط الداخلي، وإصلاح البادئات `//` و `https/`.
+     * نفس المنطق العامل في SexAlArabNet و Sexalarab11.
+     */
+    private fun clean(url: String): String {
+        val decoded = when {
+            url.startsWith("function/0/") -> {
+                try {
+                    android.util.Base64.decode(url.removePrefix("function/0/"), android.util.Base64.DEFAULT).toString(Charsets.UTF_8)
+                } catch (_: Exception) { url.removePrefix("function/0/") }
+            }
+            else -> url
+        }
+        return when {
+            decoded.startsWith("//") -> "https:$decoded"
+            decoded.startsWith("https/") -> "https://${decoded.removePrefix("https/")}"
+            else -> decoded
+        }
     }
 }
