@@ -2,7 +2,7 @@ android {
     namespace = "com.onshort.plugin"
 }
 
-version = 13
+version = 14
 
 cloudstream {
     description = "OnShort - مسلسلات دراما قصيرة (عربي/إنجليزي)"

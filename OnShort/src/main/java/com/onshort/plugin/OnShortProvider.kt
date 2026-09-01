@@ -366,9 +366,15 @@ class OnShortProvider : MainAPI() {
             val cachedTicket = cached?.takeIf { it.postId == postId }?.ticket
             logD("OnShort.loadLinks post=$postId ep=$ep cachedTicket=${cachedTicket?.isNotBlank() == true}")
 
-            val node = fetchEpisode(postId, ep, cachedTicket) ?: run { logD("OnShort.loadLinks fetchEpisode null -> false"); return false }
+            val node = fetchEpisode(postId, ep, cachedTicket) ?: run {
+                logD("OnShort.loadLinks fetchEpisode null -> false")
+                return false
+            }
 
-            if (node.has("error") || node.get("ok")?.asBoolean(false) == false) { logD("OnShort.loadLinks ok=false -> false"); return false }
+            if (node.has("error") || node.get("ok")?.asBoolean(false) == false) {
+                logD("OnShort.loadLinks ok=false -> false (${rejectReason(node)})")
+                return false
+            }
 
             // الصوت (مهم): HLS الخاص بـ OnShort يستخدم صوتًا مستقلاً (independent audio) —
             // الفيديو في نسخ منفصلة والصوت في مجموعة #EXT-X-MEDIA:TYPE=AUDIO منفصلة.
@@ -390,12 +396,18 @@ class OnShortProvider : MainAPI() {
                     // صوت مدمج في كل نسخة (muxed) → نعرض كل جودة كخيار منفصل بأمان
                     val fallbackHeight = Regex("""\d+""").find(serverQ)?.value?.toIntOrNull() ?: 1080
                     val known = variants.ifEmpty {
+                        // ليست ماستر متعدد الجودات — بل قائمة وسائط مباشرة أحادية الجودة
+                        // (قد تكون مفردة الجودة مثل .ts أو .mp4 مباشرة). لا نختلق جودات:
+                        // نعرض الجودة التي ذكرها الخادوم باسمها الصحيح.
                         listOf(HlsVariant(fallbackHeight, main))
                     }
                     for (v in known) {
+                        // كل جودة حقيقية تعرض باسمها (التي توفرها النسخة فعلاً). إن كان التدفق
+                        // مفرد الجودة (لا ماستر متعدد) يعرض الجودة التي ذكرها الخادوم فقط —
+                        // لا نختلق خيارات غير موجودة في المصدر.
                         val label = if (v.height > 0) "${v.height}p" else "Auto"
-                        callback(newExtractorLink(name, "${label} · OnShort", v.uri, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName(if (v.height > 0) "${v.height}p" else "1080p")
+                        callback(newExtractorLink(name, "$label · OnShort", v.uri, ExtractorLinkType.M3U8) {
+                            this.quality = getQualityFromName("$label")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
                     }
@@ -574,16 +586,35 @@ class OnShortProvider : MainAPI() {
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
-            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=${newTicket != null} url=${node.get("url")?.asText().orEmpty().take(60)}")
+            val msg = node.get("message")?.asText() ?: node.get("error")?.asText() ?: ""
+            // العلامة الحاسمة: هل يسمح الخادوم بإعادة المحاولة؟ أغلب حالات الرفض النهائي
+            // (مثل "Provider is not handled by REST bridge") وقعت من الأساس ولن أصلحها بإعادة.
+            val retryable = node.get("retryable")?.asBoolean(false) ?: (ok != true && newTicket != null)
+            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=${newTicket != null} retryable=$retryable msg=${msg.take(50)} url=${node.get("url")?.asText().orEmpty().take(60)}")
             if (!ok) {
-                // تذكرة غير صالحة/منتهية: أعد المحاولة فورًا بالتذكرة الجديدة من الجسم
-                if (newTicket != null && attempt < 3) continue
-                return null
+                // لا نعيد المحاولة إذا كان الخادوم قال إن الرفض نهائي (لا توجد تذكرة جديدة
+                // أو retryable=false صراحة). البوابة تُطبع → نرجع فورًا فلا نحرق 4 محاولات.
+                if (!retryable || attempt >= 3) {
+                    if (msg.isNotBlank()) logE("OnShort.fetchEpisode final reject: $msg")
+                    return null
+                }
+                continue
             }
             // نجاح: احفظ التذكرة الجديدة لبقية الحلقات (بلا جلب صفحة)
             if (newTicket != null) cached = PlayCache(postId, newTicket)
             return node
         }
         return null
+    }
+
+    // يعيد رسالة مفهومة للمستخدم بناءً على رسالة الخادوم/الوضع (تُستخدم عند عدم إيجاد روابط)
+    private fun rejectReason(node: JsonNode?): String {
+        val msg = node?.get("message")?.asText() ?: return ""
+        return when {
+            msg.contains("REST bridge") || msg.contains("not handled") -> "المنصة غير مدعومة في OnShort (خادم الموقع نفسه يرفضها)"
+            msg.contains("session expired") || msg.contains("401") -> "انتهت جلسة التذكرة — حاول مرة أخرى"
+            msg.contains("refresh failed") -> msg
+            else -> msg
+        }
     }
 }
