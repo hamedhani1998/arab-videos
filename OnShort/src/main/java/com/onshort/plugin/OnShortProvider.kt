@@ -587,14 +587,19 @@ class OnShortProvider : MainAPI() {
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
             val msg = node.get("message")?.asText() ?: node.get("error")?.asText() ?: ""
-            // العلامة الحاسمة: هل يسمح الخادوم بإعادة المحاولة؟ أغلب حالات الرفض النهائي
-            // (مثل "Provider is not handled by REST bridge") وقعت من الأساس ولن أصلحها بإعادة.
-            val retryable = node.get("retryable")?.asBoolean(false) ?: (ok != true && newTicket != null)
-            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=${newTicket != null} retryable=$retryable msg=${msg.take(50)} url=${node.get("url")?.asText().orEmpty().take(60)}")
+            // تمييز حاسم: الخادم يصدر تذكرة جديدة في كل استجابة (حتى المرفوضة نهائيًا).
+            // رفضُه النهائي يُعرَّف بمحتوى الرسالة (REST bridge / not handled) وليس بـ retryable:
+            //  - "Player session expired" = أول خطوة bootstrap (تصدر تذكرة جديدة) — يجب متابعتها،
+            //    مهما كان retryable=false، وإلا لن يشتغل أي مصدر (أثبتنا أن المحاولة الثانية تنجح).
+            //  - "REST bridge"/"not handled"/"Media refresh 401" = رفض نهائي حقيقي — أوقف المحاولة.
+            val notHandled = msg.contains("REST bridge") || msg.contains("not handled")
+            val hard401 = msg.contains("refresh failed") && msg.contains("401")
+            val permanentReject = notHandled || hard401
+            val hasFresh = newTicket != null
+            val canRetry = (attempt < 3) && !permanentReject
+            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=$hasFresh permReject=$permanentReject msg=${msg.take(50)} url=${node.get("url")?.asText().orEmpty().take(60)}")
             if (!ok) {
-                // لا نعيد المحاولة إذا كان الخادوم قال إن الرفض نهائي (لا توجد تذكرة جديدة
-                // أو retryable=false صراحة). البوابة تُطبع → نرجع فورًا فلا نحرق 4 محاولات.
-                if (!retryable || attempt >= 3) {
+                if (!canRetry) {
                     if (msg.isNotBlank()) logE("OnShort.fetchEpisode final reject: $msg")
                     return null
                 }
