@@ -303,6 +303,48 @@ class OnShortProvider : MainAPI() {
         th.start()
     }
 
+    // ---------- تحليل الماستر (كل الجودات + الأصوات) ----------
+    private data class HlsVariant(val height: Int, val uri: String)
+    private data class HlsAudio(val group: String, val name: String, val uri: String)
+
+    private suspend fun fetchMaster(url: String): String? = getWithRetry(url, mainUrl)
+
+    // يقرأ الماستر ويستخرج: (قائمة الجودات، قائمة مجموعات الصوت).
+    // الماستر بأسلوب AWS MediaConvert "independent audio":
+    // كل جودة في نسخة فيديو منفصلة (بدون مسار صوت) + مجموعة #EXT-X-MEDIA:TYPE=AUDIO منفصلة.
+    // إنْ لم توجد مجموعة صوت فالصوت مدمجٌ في كل نسخة (muxed) → عندها تُعرض كل جودة وحدها بأمان.
+    private fun parseMaster(text: String, masterUrl: String): Pair<List<HlsVariant>, List<HlsAudio>> {
+        val base = masterUrl.substringBeforeLast("/")
+        val variants = mutableListOf<HlsVariant>()
+        val audios = mutableListOf<HlsAudio>()
+        val lines = text.split("\n")
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            when {
+                line.startsWith("#EXT-X-MEDIA:TYPE=AUDIO") -> {
+                    val g = Regex("""GROUP-ID="([^"]+)"""").find(line)?.groupValues?.get(1) ?: ""
+                    val nm = Regex("""NAME="([^"]+)"""").find(line)?.groupValues?.get(1) ?: g
+                    val u = Regex("""URI="([^"]+)"""").find(line)?.groupValues?.get(1)
+                    if (u != null) audios.add(HlsAudio(g, nm, if (u.startsWith("http")) u else "$base/$u"))
+                }
+                line.startsWith("#EXT-X-STREAM-INF") -> {
+                    val h = Regex("""RESOLUTION=\d+x(\d+)""").find(line)?.groupValues?.get(1)?.toIntOrNull()
+                    val next = lines.getOrNull(i + 1)?.trim()
+                    if (next != null && !next.startsWith("#")) {
+                        variants.add(HlsVariant(h ?: 0, if (next.startsWith("http")) next else "$base/$next"))
+                    }
+                }
+            }
+            i++
+        }
+        return variants.sortedByDescending { it.height } to audios
+    }
+
+    // يحوّل كود اللغة من "pl-PL"/"ar-SA" إلى الشكل القصير ("pl"/"ar") الذي يقبله التطبيق
+    private fun normalizeLang(raw: String): String =
+        raw.trim().lowercase().substringBefore('-').substringBefore('_').ifBlank { "ar" }
+
     // ---------- روابط التشغيل (loadLinks) ----------
     override suspend fun loadLinks(
         data: String,
@@ -336,20 +378,62 @@ class OnShortProvider : MainAPI() {
             // تشغيلُها يؤدي إلى صمتٍ تام (لا يوجد صوت). master فقط هو المضمون السليم صوتيًا.
             val main = node.get("url")?.asText()
             if (!main.isNullOrBlank()) {
-                // يُفضَّل تركه متكيّفًا (لا نُثبّت جودة) حتى يختار المشغّل الجودة الأنسب
-                val q = node.get("quality")?.asText() ?: "auto"
-                callback(newExtractorLink(name, "${q} · Auto", main, ExtractorLinkType.M3U8) {
-                    this.quality = getQualityFromName(q.takeIf { it.isNotBlank() } ?: "1080")
-                    this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                })
+                val serverQ = node.get("quality")?.asText() ?: "1080"
+                // جلب الماستر وتحليل كل الجودات والأصوات. أي فشل في التحليل = لا نكسر التشغيل:
+                // نعود للمسلطة التكيفية نفسها (وهي مضمونة الصوت) ولا نعرض خيارات ناقصة.
+                val masterText = try { fetchMaster(main) } catch (e: Exception) { null }
+                val (variants, audios) = if (masterText != null) parseMaster(masterText, main)
+                    else (emptyList<HlsVariant>() to emptyList<HlsAudio>())
+                logD("OnShort.loadLinks master variants=${variants.size} audios=${audios.size}")
+
+                if (audios.isEmpty()) {
+                    // صوت مدمج في كل نسخة (muxed) → نعرض كل جودة كخيار منفصل بأمان
+                    val fallbackHeight = Regex("""\d+""").find(serverQ)?.value?.toIntOrNull() ?: 1080
+                    val known = variants.ifEmpty {
+                        listOf(HlsVariant(fallbackHeight, main))
+                    }
+                    for (v in known) {
+                        val label = if (v.height > 0) "${v.height}p" else "Auto"
+                        callback(newExtractorLink(name, "${label} · OnShort", v.uri, ExtractorLinkType.M3U8) {
+                            this.quality = getQualityFromName(if (v.height > 0) "${v.height}p" else "1080p")
+                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                        })
+                    }
+                } else {
+                    // صوت مستقل (independent audio): الفيديو بدون صوت والنطق في مسارات منفصلة.
+                    // إما أن نعرض الماستر التكيفي (كل الجودات + الصوت => أصوات قابلة للتبديل) —
+                    // فهو الخيار المضمون كما كان — وإلى جانبه نعرض كل مسار صوتي كخيارٍ مستقل
+                    // (تشغيله يعطي نطق ذلك المسار). كل جودةٍ وحدها = فيديو صامت، فلا نعرضها منفردة.
+                    // نسمّي الماستر بكل الجودات الفعلية حتى يعرف المستخدم أن كل الجودات داخله.
+                    val qLabel = variants.map { "${it.height}p" }.ifEmpty { listOf("Auto") }.joinToString(" / ")
+                    callback(newExtractorLink(name, "Auto · $qLabel", main, ExtractorLinkType.M3U8) {
+                        this.quality = getQualityFromName("1080")
+                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                    })
+                    // المسارات الصوتية: نمرر كل مجموعة منفصلة إذا وُجدت (عادة مسار واحد en-US)
+                    val em = mutableSetOf<String>()
+                    for (a in audios) {
+                        if (a.group.isBlank() && a.name.isBlank()) continue
+                        val key = a.uri
+                        if (!em.add(key)) continue
+                        val label = (a.name.takeIf { it.isNotBlank() } ?: "صوت").take(60)
+                        callback(newExtractorLink(name, "صوت · $label", a.uri, ExtractorLinkType.M3U8) {
+                            this.quality = getQualityFromName("1")
+                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                        })
+                    }
+                }
             }
 
             val subs = node.get("subtitles")
             if (subs != null && subs.isArray) {
+                val seen = mutableSetOf<String>()
                 for (s in subs) {
                     val su = s.get("url")?.asText() ?: continue
                     if (su.isBlank()) continue
-                    val lang = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
+                    if (!seen.add(su)) continue
+                    val langRaw = s.get("lang")?.asText() ?: s.get("label")?.asText() ?: "ar"
+                    val lang = normalizeLang(langRaw)
                     try { subtitleCallback(newSubtitleFile(lang, su)) } catch (_: Exception) {}
                 }
             }
