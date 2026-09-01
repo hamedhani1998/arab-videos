@@ -137,6 +137,14 @@ class OnShortProvider : MainAPI() {
         return if (i >= 0) url.substring(0, i) else url
     }
 
+    // يستخرج الرقم من نهاية postId — فقد يصل رقمًا خامًا (186910) أو رابطًا كاملًا
+    // (https://onshort.net/ar/186910) انطلاقًا من روابط قديمة/مشاركة/بحث بلا ؟cs=.
+    // API التشغيل يتطلب الرقم فقط؛ أي شيء آخر → 403 → "لم يعثر على روابط".
+    private fun extractPostId(raw: String): String {
+        val m = Regex("""(\d{3,14})$""").find(raw.trim())
+        return m?.groupValues?.get(1) ?: raw
+    }
+
     // رابط صفحة التفاصيل من postId عبر ?p= (ووردبريس) — استخدم النطاق الجذر وليس /ar/
     // لأن ?p= في /ar/ لا يُرجع التذكرة بينما الجذر يرجعها (تحقّقت).
     private fun detailUrl(postId: String): String = "https://onshort.net/?p=$postId"
@@ -208,13 +216,15 @@ class OnShortProvider : MainAPI() {
             val meta = parseMeta(url)
             if (meta != null) {
                 // نبني الحلقات فورًا من البيانات المضمّنة، ونجلب التذكرة في الخلفية للتشغيل
-                prefetchTicket(meta.id)
-                return buildEpisodes(meta.id, meta.total, meta.title, meta.poster, stripMeta(url))
+                val cleanId = extractPostId(meta.id)
+                prefetchTicket(cleanId)
+                return buildEpisodes(cleanId, meta.total, meta.title, meta.poster, stripMeta(url))
             }
 
             // احتياطي: رابط بدون بيانات (روابط قديمة/مشاركة) — نجلب صفحة التفاصيل
             val res = getWithRetry(stripMeta(url), mainUrl, headers()) ?: return null
-            val postId = detailPostRe.find(res)?.groupValues?.get(1) ?: return null
+            val rawId = detailPostRe.find(res)?.groupValues?.get(1) ?: return null
+            val postId = extractPostId(rawId)
             val ticket = detailTicketRe.find(res)?.groupValues?.get(1)
             if (ticket != null) cached = PlayCache(postId, ticket)
             val total = Regex("""(?:total"|Episodes")\s*:\s*(\d{1,5})""")
@@ -304,7 +314,8 @@ class OnShortProvider : MainAPI() {
             logD("OnShort.loadLinks data='$data'")
             val parts = data.split("|")
             if (parts.size != 2) { logD("OnShort.loadLinks bad data size=${parts.size}"); return false }
-            val postId = parts[0]
+            // postId قد يصل رابطًا كاملًا (…/186910) من روابط قديمة/مشاركة — نطبّعه إلى الرقم
+            val postId = extractPostId(parts[0])
             val ep = parts[1].toIntOrNull() ?: return false
 
             // التذكرة: إن كانت محفوظة نستخدمها، وإلا نبدأ بدون تذكرة —
