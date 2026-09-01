@@ -394,18 +394,33 @@ class OnShortProvider : MainAPI() {
                 conn.setRequestProperty("User-Agent", ONS_UA)
                 conn.setRequestProperty("Referer", referer)
                 conn.setRequestProperty("Accept", "application/json, text/plain, */*")
+                // حرج: نمنع ضغط gzip. Android's HttpURLConnection يطلب gzip تلقائيًا ويفكّه
+                // في inputStream (200) لكنه لا يفكّه في errorStream (403). وخادم OnShort يُرجع
+                // جسم 403 (الذي يحمل التذكرة الجديدة) مضغوطًا gzip → بدون هذا السطر يقرأ الكود
+                // ثنائيات مضغوطة ويفشل تحليل JSON → fetchEpisode يرجع null → "لم يعثر على روابط".
+                conn.setRequestProperty("Accept-Encoding", "identity")
                 conn.setRequestProperty("Cache-Control", "no-cache, no-store")
                 conn.setRequestProperty("Pragma", "no-cache")
                 for ((k, v) in extraHeaders) conn.setRequestProperty(k, v)
                 conn.connectTimeout = 15000
                 conn.readTimeout = 25000
                 val code = conn.responseCode
-                // اقرأ الجسم من تدفق النجاح أو تدفق الخطأ (403/5xx) على حد سواء
+                // اقرأ الجسم الخام من تدفق النجاح أو الخطأ (403/5xx) على حد سواء
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                val bytes = stream?.readBytes() ?: ByteArray(0)
                 stream?.close()
                 conn.disconnect()
-                val node = mapper.readTree(body)
+                // حرج: خادم OnShort يُرجع جسم 403 (الذي يحمل التذكرة الجديدة) مضغوطًا gzip.
+                // Android قد لا يفكّ errorStream تلقائيًا، فنفكّه يدويًا إن بدأ بالـ magic (1f 8b).
+                val raw = if (bytes.size >= 2 && (bytes[0].toInt() and 0xff) == 0x1f && (bytes[1].toInt() and 0xff) == 0x8b) {
+                    try {
+                        java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(bytes))
+                            .bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    } catch (_: Exception) { String(bytes, Charsets.UTF_8) }
+                } else {
+                    String(bytes, Charsets.UTF_8)
+                }
+                val node = mapper.readTree(raw)
                 if (node != null) return node
             } catch (_: Exception) {
                 // 502/504/مهلة — أعد المحاولة
