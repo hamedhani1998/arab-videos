@@ -377,6 +377,18 @@ class OnShortProvider : MainAPI() {
     private fun normalizeLang(raw: String): String =
         raw.trim().lowercase().substringBefore('-').substringBefore('_').ifBlank { "ar" }
 
+    // يحدد نوع الرابط الحقيقي: HLS (m3u8) ↔ MP4 مباشر. بعض خوادم OnShort تُرجع MP4 مباشرًا
+    // (dramaboxdb/flextv.cc) وهذا كسر التشغيل عندما يُرسل كـ M3U8 — المشغل يفشل بـ "Source error".
+    private fun linkType(uri: String): ExtractorLinkType {
+        val clean = uri.substringBefore('?').substringBefore('#').lowercase()
+        return if (clean.endsWith(".m3u8") || clean.contains("/m3u8") || clean.contains("playlist")) {
+            ExtractorLinkType.M3U8
+        } else {
+            // ملف مباشر (mp4/ts/...): يشغّله ExoPlayer مباشرةً دون فك HLS
+            ExtractorLinkType.VIDEO
+        }
+    }
+
     // ---------- روابط التشغيل (loadLinks) ----------
     override suspend fun loadLinks(
         data: String,
@@ -438,7 +450,8 @@ class OnShortProvider : MainAPI() {
                         // مفرد الجودة (لا ماستر متعدد) يعرض الجودة التي ذكرها الخادوم فقط —
                         // لا نختلق خيارات غير موجودة في المصدر.
                         val label = if (v.height > 0) "${v.height}p" else "Auto"
-                        callback(newExtractorLink(name, "$label · OnShort", v.uri, ExtractorLinkType.M3U8) {
+                        val type = linkType(v.uri) // M3U8 أو DIRECT (بعض الخوادم MP4 مباشر)
+                        callback(newExtractorLink(name, "$label · OnShort", v.uri, type) {
                             this.quality = getQualityFromName("$label")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
@@ -450,7 +463,9 @@ class OnShortProvider : MainAPI() {
                     // (تشغيله يعطي نطق ذلك المسار). كل جودةٍ وحدها = فيديو صامت، فلا نعرضها منفردة.
                     // نسمّي الماستر بكل الجودات الفعلية حتى يعرف المستخدم أن كل الجودات داخله.
                     val qLabel = variants.map { "${it.height}p" }.ifEmpty { listOf("Auto") }.joinToString(" / ")
-                    callback(newExtractorLink(name, "Auto · $qLabel", main, ExtractorLinkType.M3U8) {
+                    // الرابط الرئيسي قد يكون m3u8 (بدون امتداد أحيانًا) أو mp4 مباشر (dramaboxdb/flextv)
+                    val mainType = linkType(main)
+                    callback(newExtractorLink(name, "Auto · $qLabel", main, mainType) {
                         this.quality = getQualityFromName("1080")
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
