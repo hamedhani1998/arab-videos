@@ -635,5 +635,24 @@
     "description": "Reelree - مسلسلات دراما قصيرة عمودية مترجمة ومدبلجة",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/Reelree.cs3",
     "name": "Reelree"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
+    "fileSize": 19721,
+    "status": 1,
+    "language": "en",
+    "authors": [
+      "hamedhani1998"
+    ],
+    "tvTypes": [
+      "TvSeries"
+    ],
+    "version": 1,
+    "internalName": "MinuteDrama",
+    "description": "MinuteDrama - مسلسلات دراما قصيرة إنجليزية",
+    "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/MinuteDrama.cs3",
+    "name": "MinuteDrama",
+    "iconUrl": "https://minutedrama.com/top_logo.png"
   }
 ]
