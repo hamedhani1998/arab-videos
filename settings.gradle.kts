@@ -1,33 +1,15 @@
-include(":Aflamk1")
-include(":ArabxCam")
-include(":Arbada")
-include(":SexAlArab")
-include(":Sex6x")
-include(":Zebzob")
-include(":Zebawy")
-include(":SexSatee")
-include(":FagerNeek")
-include(":Sexalarab11")
-include(":ArabSexx")
-include(":ArabNok")
-include(":SexArab69")
-include(":ArabSexXxx")
-include(":SexAllArab")
-include(":FreeSexArab")
-include(":ArabHubX")
-include(":ArabSex1")
-include(":ArbNaar")
-include(":XNXX3rab")
-include(":SexArabFun")
-include(":SexAlArabNet")
-include(":Drama4All")
-include(":NartoDrama")
-include(":ShortTV")
-include(":StardustTV")
-include(":FlexTV")
-include(":NetShort")
-include(":ReelShort")
-include(":OnShort")
-include(":DeepDrama")
-include(":Reelree")
-include(":extractors")
+rootProject.name = "arab-videos"
+
+// يكتشف الوحدات تلقائياً — كل مجلد يحتوي build.gradle.kts يُضمَّن كوحدة.
+// لإخفاء وحدة، أضف اسمها إلى قائمة disabled.
+val disabled = listOf<String>()
+
+File(rootDir, ".").eachDir { dir ->
+    if (!disabled.contains(dir.name) && File(dir, "build.gradle.kts").exists()) {
+        include(dir.name)
+    }
+}
+
+fun File.eachDir(block: (File) -> Unit) {
+    listFiles()?.filter { it.isDirectory }?.forEach { block(it) }
+}

@@ -1,9 +1,0 @@
-{
-  "iconUrl": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/main/icon.svg",
-  "name": "My Cloudstream Extensions",
-  "description": "مستودع الإضافات الخاصة لـ Cloudstream",
-  "manifestVersion": 1,
-  "pluginLists": [
-    "https://raw.githubusercontent.com/hamedhani1998/arab-videos/main/index.min.json"
-  ]
-}
