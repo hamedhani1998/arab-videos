@@ -429,55 +429,73 @@ class OnShortProvider : MainAPI() {
             val main = node.get("url")?.asText()
             if (!main.isNullOrBlank()) {
                 val serverQ = node.get("quality")?.asText() ?: "1080"
-                // جلب الماستر وتحليل كل الجودات والأصوات. أي فشل في التحليل = لا نكسر التشغيل:
-                // نعود للمسلطة التكيفية نفسها (وهي مضمونة الصوت) ولا نعرض خيارات ناقصة.
+                // candidates[] يحمل كل جودة برابطها المستقل — مزوّدات مثل dramabox/flextv
+                // ترجع MP4 مباشرًا بعدة جودات هنا. نستبعد ما ليس kind=="media" (علامات/إعلانات إن وُجدت).
+                val candidates = mutableListOf<HlsVariant>()
+                val candArr = node.get("candidates")
+                if (candArr != null && candArr.isArray) {
+                    for (c in candArr) {
+                        val cu = c.get("url")?.asText() ?: continue
+                        if (cu.isBlank()) continue
+                        if ((c.get("kind")?.asText() ?: "media") != "media") continue
+                        val h = Regex("""\d+""").find(c.get("quality")?.asText() ?: "")?.value?.toIntOrNull() ?: 0
+                        candidates.add(HlsVariant(h, cu))
+                    }
+                }
+
+                // جلب الماستر وتحليل كل الجودات والأصوات. أي فشل في التحليل = لا نكسر التشغيل.
                 val masterText = try { fetchMaster(main) } catch (e: Exception) { null }
                 val (variants, audios) = if (masterText != null) parseMaster(masterText, main)
                     else (emptyList<HlsVariant>() to emptyList<HlsAudio>())
-                logD("OnShort.loadLinks master variants=${variants.size} audios=${audios.size}")
+                logD("OnShort.loadLinks master variants=${variants.size} audios=${audios.size} candidates=${candidates.size}")
 
-                if (audios.isEmpty()) {
-                    // صوت مدمج في كل نسخة (muxed) → نعرض كل جودة كخيار منفصل بأمان
-                    val fallbackHeight = Regex("""\d+""").find(serverQ)?.value?.toIntOrNull() ?: 1080
-                    val known = variants.ifEmpty {
-                        // ليست ماستر متعدد الجودات — بل قائمة وسائط مباشرة أحادية الجودة
-                        // (قد تكون مفردة الجودة مثل .ts أو .mp4 مباشرة). لا نختلق جودات:
-                        // نعرض الجودة التي ذكرها الخادوم باسمها الصحيح.
-                        listOf(HlsVariant(fallbackHeight, main))
-                    }
-                    for (v in known) {
-                        // كل جودة حقيقية تعرض باسمها (التي توفرها النسخة فعلاً). إن كان التدفق
-                        // مفرد الجودة (لا ماستر متعدد) يعرض الجودة التي ذكرها الخادوم فقط —
-                        // لا نختلق خيارات غير موجودة في المصدر.
-                        val label = if (v.height > 0) "${v.height}p" else "Auto"
-                        val type = linkType(v.uri) // M3U8 أو DIRECT (بعض الخوادم MP4 مباشر)
-                        callback(newExtractorLink(name, "$label · OnShort", v.uri, type) {
-                            this.quality = getQualityFromName("$label")
+                when {
+                    // HLS حقيقي بجودات متعددة + صوت مستقل: نسلم الماستر التكيفي (كل الجودات
+                    // + أصوات قابلة للتبديل) وإلى جانبه كل مسار صوتي كخيار مستقل.
+                    variants.isNotEmpty() && audios.isNotEmpty() -> {
+                        val qLabel = variants.map { "${it.height}p" }.joinToString(" / ")
+                        callback(newExtractorLink(name, "Auto · $qLabel", main, ExtractorLinkType.M3U8) {
+                            this.quality = getQualityFromName("1080")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
+                        val em = mutableSetOf<String>()
+                        for (a in audios) {
+                            if (a.group.isBlank() && a.name.isBlank()) continue
+                            if (!em.add(a.uri)) continue
+                            val label = (a.name.takeIf { it.isNotBlank() } ?: "صوت").take(60)
+                            callback(newExtractorLink(name, "صوت · $label", a.uri, ExtractorLinkType.M3U8) {
+                                this.quality = getQualityFromName("1")
+                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                            })
+                        }
                     }
-                } else {
-                    // صوت مستقل (independent audio): الفيديو بدون صوت والنطق في مسارات منفصلة.
-                    // إما أن نعرض الماستر التكيفي (كل الجودات + الصوت => أصوات قابلة للتبديل) —
-                    // فهو الخيار المضمون كما كان — وإلى جانبه نعرض كل مسار صوتي كخيارٍ مستقل
-                    // (تشغيله يعطي نطق ذلك المسار). كل جودةٍ وحدها = فيديو صامت، فلا نعرضها منفردة.
-                    // نسمّي الماستر بكل الجودات الفعلية حتى يعرف المستخدم أن كل الجودات داخله.
-                    val qLabel = variants.map { "${it.height}p" }.ifEmpty { listOf("Auto") }.joinToString(" / ")
-                    // الرابط الرئيسي قد يكون m3u8 (بدون امتداد أحيانًا) أو mp4 مباشر (dramaboxdb/flextv)
-                    val mainType = linkType(main)
-                    callback(newExtractorLink(name, "Auto · $qLabel", main, mainType) {
-                        this.quality = getQualityFromName("1080")
-                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                    })
-                    // المسارات الصوتية: نمرر كل مجموعة منفصلة إذا وُجدت (عادة مسار واحد en-US)
-                    val em = mutableSetOf<String>()
-                    for (a in audios) {
-                        if (a.group.isBlank() && a.name.isBlank()) continue
-                        val key = a.uri
-                        if (!em.add(key)) continue
-                        val label = (a.name.takeIf { it.isNotBlank() } ?: "صوت").take(60)
-                        callback(newExtractorLink(name, "صوت · $label", a.uri, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName("1")
+                    // HLS مدمج الصوت (muxed): كل جودة نسخة كاملة صوتيًا — نعرضها منفردة.
+                    variants.isNotEmpty() -> {
+                        for (v in variants) {
+                            val label = if (v.height > 0) "${v.height}p" else "Auto"
+                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
+                                this.quality = getQualityFromName("$label")
+                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                            })
+                        }
+                    }
+                    // MP4 مباشر متعدد الجودات (dramaboxdb/flextv): نعرض كل جودة كخيار مستقل.
+                    candidates.isNotEmpty() -> {
+                        val seen = mutableSetOf<String>()
+                        for (v in candidates) {
+                            if (!seen.add(v.uri)) continue
+                            val label = if (v.height > 0) "${v.height}p" else "Auto"
+                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
+                                this.quality = getQualityFromName("$label")
+                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                            })
+                        }
+                    }
+                    // جودة واحدة فقط — نعرض main كما ذكرها الخادوم باسمها الصحيح.
+                    else -> {
+                        val label = Regex("""\d+""").find(serverQ)?.value?.let { "${it}p" } ?: "Auto"
+                        callback(newExtractorLink(name, "$label · OnShort", main, linkType(main)) {
+                            this.quality = getQualityFromName("$label")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
                     }
