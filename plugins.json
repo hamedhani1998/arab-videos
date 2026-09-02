@@ -83,7 +83,7 @@
     "tvTypes": [
       "NSFW"
     ],
-    "version": 2,
+    "version": 1,
     "internalName": "SexAlArab",
     "description": "سكس العرب - أفلام إباحية عربية مترجمة",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/SexAlArab.cs3",
@@ -445,7 +445,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 3,
+    "version": 1,
     "internalName": "NartoDrama",
     "description": "Narto Drama - مسلسلات دراما مترجمة",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/NartoDrama.cs3",
@@ -464,7 +464,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 6,
+    "version": 1,
     "internalName": "ShortTV",
     "description": "ShortTV - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/ShortTV.cs3",
@@ -502,7 +502,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 2,
+    "version": 1,
     "internalName": "FlexTV",
     "description": "FlexTV - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/FlexTV.cs3",
@@ -521,7 +521,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 6,
+    "version": 1,
     "internalName": "NetShort",
     "description": "NetShort - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/NetShort.cs3",
@@ -540,7 +540,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 8,
+    "version": 1,
     "internalName": "ReelShort",
     "description": "ReelShort - مسلسلات دراما قصيرة عمودية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/ReelShort.cs3",
@@ -559,7 +559,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 26,
+    "version": 1,
     "internalName": "OnShort",
     "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/OnShort.cs3",
