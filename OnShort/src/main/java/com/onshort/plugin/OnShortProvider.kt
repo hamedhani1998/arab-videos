@@ -529,11 +529,15 @@ class OnShortProvider : MainAPI() {
                     )
                     val seen = mutableSetOf<String>()
                     for (v in ranked) {
+                        // تجاهل الرابط الأساسي (لا نكرّره)
                         if (v.uri == mainPlay) continue
+                        // لا نعرض "Auto" مكررًا بلا معنى من candidate مجهول الجودة (height=0)
+                        // يطابق أساسي الوظيفة — نحتفظ فقط بالجودات الصريحة (height>0).
+                        if (v.height <= 0) continue
                         if (!seen.add(v.uri)) continue
-                        val label = if (v.height > 0) "${v.height}p" else "Auto"
+                        val label = "${v.height}p"
                         callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
-                            this.quality = getQualityFromName(if (v.height > 0) "${v.height}p" else "1080")
+                            this.quality = getQualityFromName("${v.height}p")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
                     }
