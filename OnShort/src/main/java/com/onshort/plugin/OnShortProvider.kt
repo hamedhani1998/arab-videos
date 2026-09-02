@@ -516,8 +516,19 @@ class OnShortProvider : MainAPI() {
                     })
 
                     // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
+                    // ترتيب العرض: الروابط الأعلى موثوقية ("nav"/"nav2" — الأساس الصالح) أولًا
+                    // تنازليًا حسب الدقة، ثم روابط "narrow" (الأقل استقرارًا على بعض الخوادم مثل
+                    // dramaboxdb) في النهاية. نُبقي كل الروابط — لا حذف — لكن نُبرز الصالح أولًا.
+                    val ranked = candidates.sortedWith(
+                        Comparator { a, b ->
+                            val ca = if (a.uri.contains("narrow")) 1 else 0
+                            val cb = if (b.uri.contains("narrow")) 1 else 0
+                            if (ca != cb) ca - cb
+                            else b.height - a.height
+                        }
+                    )
                     val seen = mutableSetOf<String>()
-                    for (v in candidates) {
+                    for (v in ranked) {
                         if (v.uri == mainPlay) continue
                         if (!seen.add(v.uri)) continue
                         val label = if (v.height > 0) "${v.height}p" else "Auto"
