@@ -560,10 +560,10 @@
       "Movie"
     ],
     "version": 22,
-    "internalName": "OnShort",
+    "internalName": "OnShort22",
     "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/builds/OnShort.cs3",
-    "name": "OnShort"
+    "name": "OnShort (عربي)"
   },
   {
     "apiVersion": 1,
