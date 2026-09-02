@@ -458,26 +458,39 @@ class OnShortProvider : MainAPI() {
                         candidates.add(HlsVariant(h, cu))
                     }
                 }
+                val mainLen = main.length
+                val candLens = candidates.map { it.uri.length }.joinToString(",")
+                val candHasAuth = candidates.any { it.uri.contains("auth_key") }
+                logD("OnShort.loadLinks mainLen=$mainLen candLens=[$candLens] mainAuth=${main.contains("auth_key")} candAuth=$candHasAuth")
 
                 // الاستراتيجية السريعة والآمنة (بلا أي سحب شبكة في مسار التشغيل):
                 // ExoPlayer/CloudStream يحلّل master HLS بنفسه تلقائيًا ويعطي كل الجودات
                 // والأصوات فورًا (يختار الجودة تلقائيًا). لذلك لا نحتاج جلب master مسبقًا
                 // (كان هذا الجلب هو سبب تأخير عرض الفيديو والجودات).
-                // القاعدة:
-                //   • main دائمًا يُسلّم كأساس "Auto" — الرابط المؤكّد التشغيل (كان يعمل قبل
-                //     إضافة candidates؛ إبقاؤه يمنع الشاشة السوداء).
-                //   • كل مرشح مختلف عن main يُعرض بجودته كخيار صريح (لا نكرر main ولا نرسل
-                //     مرشحات مكسورة قد تسبب شاشة سوداء — نكتفي بالروابط الصالحة المميزة).
+                var mainPlay = main
                 if (candidates.isNotEmpty()) {
                     val mainIsHls = linkType(main) == ExtractorLinkType.M3U8
                     val mainInCandidates = candidates.any { it.uri == main }
-                    logD("OnShort.loadLinks candidates=${candidates.size} mainHls=$mainIsHls inCands=$mainInCandidates")
+                    // إصلاح الخوادم التي ترسل main ناقصًا (MP4 بلا auth_key) بينما المرشحات
+                    // تحمل توقيعًا: نختار أفضل مرشح موقّع كأساس التشغيل (flextv/dramaboxdb).
+                    val mainHasAuth = main.contains("auth_key")
+                    val best = if (!mainIsHls && !mainHasAuth) {
+                        candidates.filter { it.uri.contains("auth_key") }.maxByOrNull { it.height }
+                            ?: candidates.firstOrNull()
+                    } else null
+                    if (best != null) {
+                        logD("OnShort.loadLinks REPLACE main(bare) -> cand h=${best.height} (${main.take(55)}... => ${best.uri.take(55)}...)")
+                        mainPlay = best.uri
+                    }
+                    val effIsHls = linkType(mainPlay) == ExtractorLinkType.M3U8
+                    val effInCands = candidates.any { it.uri == mainPlay }
+                    logD("OnShort.loadLinks candidates=${candidates.size} mainHls=$effIsHls inCands=$effInCands mainWasHls=$mainIsHls")
 
-                    // أساس: main. إن كان m3u8 (master/تشغيل adaptif) سلّمه كـ "Auto"
+                    // أساس: main (المُحسَّن). إن كان m3u8 (master/تشغيل adaptif) سلّمه كـ "Auto"
                     // (ExoPlayer يحلّل master: كل الجودات + صوت تلقائيًا). إن كان MP4 مباشر
                     // سلّمه فقط لو لم يكن مكررًا في المرشحات (حينها نعرض المرشحات بدلًا منه).
-                    if (mainIsHls || !mainInCandidates) {
-                        callback(newExtractorLink(name, "Auto · OnShort", main, mainIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
+                    if (effIsHls || !effInCands) {
+                        callback(newExtractorLink(name, "Auto · OnShort", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
                     }
@@ -485,7 +498,7 @@ class OnShortProvider : MainAPI() {
                     // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
                     val seen = mutableSetOf<String>()
                     for (v in candidates) {
-                        if (v.uri == main) continue
+                        if (v.uri == mainPlay) continue
                         if (!seen.add(v.uri)) continue
                         val label = if (v.height > 0) "${v.height}p" else "Auto"
                         callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
@@ -496,7 +509,7 @@ class OnShortProvider : MainAPI() {
                 } else {
                     // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
                     // mp4 = مباشر). بلا جلب — يفتح فورًا.
-                    callback(newExtractorLink(name, "Auto · OnShort", main, linkType(main)) {
+                    callback(newExtractorLink(name, "Auto · OnShort", mainPlay, linkType(mainPlay)) {
                         this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                     })
                 }
@@ -639,17 +652,32 @@ class OnShortProvider : MainAPI() {
         ticket: String?
     ): JsonNode? {
         var current = ticket
+        var timeoutFails = 0 // عدد فشل rawGetJson المتتالي (timeout/parse) — تجاوزه مباشرة لـ fallback
         for (attempt in 0..3) {
             val ts = System.currentTimeMillis()
             val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
             // إن لم تكن لدينا تذكرة نرسل بدونها: الخادم يرد 403 مع تذكرة صالحة في الجسم
-            // نبدأ منها (boootstrap سريع — لا حاجة لصفحة ?p= البطيئة التي كانت تسبب المهلة).
+            // نبدأ منها (bootstrap سريع — لا حاجة لصفحة ?p= البطيئة التي كانت تسبب المهلة).
             val hdrs = mutableMapOf("X-ONShort-Player" to "1") // مطلوب بشدة
             if (!current.isNullOrBlank()) hdrs["X-ONShort-Ticket"] = current
             val node = rawGetJson(u, mainUrl, hdrs) ?: run {
-                logD("OnShort.fetchEpisode null at attempt=$attempt")
-                return null
+                // rawGetJson فشل (timeout/parse) — لا نتوقف فورًا: أعد المحاولة بنفس التذكرة.
+                // هذا يمنع توقف loadLinks على idrama/moborels عندما يفشل الاتصال مؤقتاً.
+                timeoutFails++
+                logD("OnShort.fetchEpisode null attempt=$attempt timeouts=$timeoutFails (continuing)")
+                // إذا فشل rawGetJson مرتين متتاليتين = اتصال معطّل أو محظور → لا جدوى من المحاولة ال3+4
+                if (timeoutFails >= 2) {
+                    logD("OnShort.fetchEpisode too many timeouts, stopping")
+                    break
+                }
+                if (current.isNullOrBlank()) {
+                    // لا تذكرة: حاول جلبها من صفحة التفاصيل (fallback بطيء لكن ينقذ الموقف)
+                    val fetched = fetchTicket(postId)
+                    if (fetched != null) current = fetched
+                }
+                continue
             }
+            timeoutFails = 0 // نجاح: صفّر عداد الـ timeout
             val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
             if (newTicket != null) current = newTicket
             val ok = node.get("ok")?.asBoolean(false) ?: true
@@ -667,7 +695,8 @@ class OnShortProvider : MainAPI() {
             val permanentReject = notHandled || refreshFail
             val hasFresh = newTicket != null
             val canRetry = (attempt < 3) && !permanentReject
-            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=$hasFresh permReject=$permanentReject msg=${msg.take(50)} url=${node.get("url")?.asText().orEmpty().take(60)}")
+            val fullUrl = node.get("url")?.asText().orEmpty()
+            logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=$hasFresh permReject=$permanentReject msg=${msg.take(50)} urlLen=${fullUrl.length} url=${fullUrl.take(60)}")
             if (!ok) {
                 if (!canRetry) {
                     if (msg.isNotBlank()) logE("OnShort.fetchEpisode final reject: $msg")
@@ -679,6 +708,26 @@ class OnShortProvider : MainAPI() {
             if (newTicket != null) cached = PlayCache(postId, newTicket)
             return node
         }
+
+        // === Fallback: حاول جلب تذكرة من صفحة التفاصيل وإعادة المحاولة最后一次 ===
+        // ينقذ idrama/moborels عندما تفشل جميع محاولات API بسبب بطء/timeout مؤقت.
+        val fallbackTicket = fetchTicket(postId)
+        if (!fallbackTicket.isNullOrBlank()) {
+            val ts = System.currentTimeMillis()
+            val u = "$ONS_PLAY_API?post=$postId&episode=$ep&_t=$ts"
+            val hdrs = mutableMapOf("X-ONShort-Player" to "1", "X-ONShort-Ticket" to fallbackTicket)
+            val node = rawGetJson(u, mainUrl, hdrs)
+            if (node != null) {
+                val ok = node.get("ok")?.asBoolean(false) ?: true
+                if (ok) {
+                    val newTicket = node.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
+                    if (newTicket != null) cached = PlayCache(postId, newTicket)
+                    logD("OnShort.fetchEpisode fallback SUCCESS")
+                    return node
+                }
+            }
+        }
+        logD("OnShort.fetchEpisode all attempts failed for post=$postId ep=$ep")
         return null
     }
 
