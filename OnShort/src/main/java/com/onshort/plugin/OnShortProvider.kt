@@ -594,14 +594,16 @@ class OnShortProvider : MainAPI() {
         }
 
         // المسار 2 — احتياطي خام: يقرأ errorStream على 403/5xx ويفكّ gzip يدويًا.
+        // مهلات قصيرة + محاولتان فقط — حتى لا يَعلّق loadLinks ثوانٍ طويلة على بطء/تقييد
+        // OnShort (رصدنا تعلّقًا ~12ث بسبب readTimeout 20ث و3 محاولات مع backoff طويل).
         var attempt = 0
-        while (attempt < 3) {
+        while (attempt < 2) {
             try {
                 val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
                 conn.requestMethod = "GET"
                 for ((k, v) in hdrs) conn.setRequestProperty(k, v)
-                conn.connectTimeout = 12000
-                conn.readTimeout = 20000
+                conn.connectTimeout = 7000
+                conn.readTimeout = 8000
                 val code = conn.responseCode
                 logD("OnShort.rawGetJson http=$code (attempt=$attempt)")
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -625,7 +627,7 @@ class OnShortProvider : MainAPI() {
                 logE("OnShort.rawGetJson exception (attempt=$attempt): ${e.message}")
             }
             attempt++
-            if (attempt < 3) try { Thread.sleep(700L * attempt) } catch (_: InterruptedException) {}
+            if (attempt < 2) try { Thread.sleep(250L * attempt) } catch (_: InterruptedException) {}
         }
         logE("OnShort.rawGetJson returning null after retries")
         return null
