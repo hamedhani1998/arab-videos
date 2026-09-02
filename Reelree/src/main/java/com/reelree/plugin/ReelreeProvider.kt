@@ -33,6 +33,7 @@ class ReelreeProvider : MainAPI() {
     override var mainUrl = "https://reelree.com"
     override var lang = "ar"
     override val hasMainPage = true
+    override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     override val mainPage = mainPageOf(
@@ -138,13 +139,28 @@ class ReelreeProvider : MainAPI() {
             val dataSource = watch?.attr("data-source")?.trim().orEmpty()
             val rrServer = parseRrServer(watch?.attr("data-rr-server2"))
 
-            // بيانات لكل حلقة: mediaTemplate | رقم الحلقة | master السيرفر الكامل (قد يكون فارغاً)
-            val eps = (1..episodes).map { n ->
-                val fullMaster = rrServer?.direct.orEmpty()
-                val data = "$mediaTemplate|$n|$fullMaster"
-                newEpisode(data) {
-                    episode = n
-                    name = "الحلقة $n"
+            // قائمة الحلقات:
+            //  1) حلقة خاصة "الحلقة كاملة" ← السيرفر الكامل (الملف المدمج بكل الجودات/الترجمات/الأصوات) — مرة واحدة
+            //  2) حلقات منفصلة 1..N ← عبر data-media / %EP% (الحلقة المستقلة)
+            val eps = mutableListOf<Episode>()
+            val fullMaster = rrServer?.direct.orEmpty()
+            if (fullMaster.startsWith("http")) {
+                eps.add(newEpisode("FULL|$fullMaster") {
+                    episode = 0
+                    name = "الحلقة كاملة"
+                })
+            }
+            if (mediaTemplate.isNullOrBlank() || !mediaTemplate.startsWith("http")) {
+                eps.add(newEpisode("FULL|$fullMaster") {
+                    episode = 0
+                    name = "الحلقة"
+                })
+            } else {
+                for (n in 1..episodes) {
+                    eps.add(newEpisode("$mediaTemplate|$n") {
+                        episode = n
+                        name = "الحلقة $n"
+                    })
                 }
             }
 
@@ -210,46 +226,15 @@ class ReelreeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|", limit = 3)
-        val template = parts.getOrNull(0)?.trim() ?: return false
-        val ep = parts.getOrNull(1)?.trim() ?: return false
-        val fullMaster = parts.getOrNull(2)?.trim().orEmpty()
-        if (template.isBlank() || !template.startsWith("http")) return false
+        // ===== المسار 1: "الحلقة كاملة" — السيرفر الكامل فقط (ملف merged بجودات + ترجمات + أصوات) =====
+        if (data.startsWith("FULL|")) {
+            val fullMaster = data.removePrefix("FULL|").trim()
+            if (!fullMaster.startsWith("http")) return false
 
-        var found = false
-
-        // ===== سيرفر 1: الحلقات — عبر data-media / %EP% =====
-        // ملاحظة: روابط /api/dx/{id}/{n}.m3u8 رغم امتدادها .m3u8 تُرجع في الواقع ملف MP4
-        // مباشر (Content-Type: video/mp4). لذلك نعاملها كـ VIDEO مباشر لا كـ HLS — فمشغّل
-        // HLS يفشل عليها (Source error). نُرسلها مباشرة للمشغّل دون جلب (فهي ملف كبير).
-        try {
-            val epUrl = template.replace("%EP%", ep)
-            if (epUrl.endsWith(".m3u8")) {
-                // رغم الامتداد .m3u8 المحتوى mp4 مباشر → VIDEO
-                callback(newExtractorLink(name, "الحلقات $ep", epUrl, ExtractorLinkType.VIDEO) {
-                    referer = mainUrl
-                    quality = getQualityFromName("720p")
-                })
-                found = true
-            } else {
-                // mp4 / رابط مباشر آخر
-                callback(newExtractorLink(name, "الحلقات $ep", epUrl, ExtractorLinkType.VIDEO) {
-                    referer = mainUrl
-                    quality = getQualityFromName("720p")
-                })
-                found = true
-            }
-        } catch (e: Exception) { }
-
-        // ===== سيرفر 2: السيرفر الكامل — ملف merged بجودات متعددة + ترجمات + أصوات =====
-        // سلّم master مباشرة للمشغّل (ExoPlayer يفكّ كل الجودات تلقائيًا)، بدل جلبها
-        // هنا — لأن جلب master الكامل قد يتجاوز المهلة (سيرفر v2 بطيء) فيفشل العرض.
-        if (fullMaster.startsWith("http")) {
-            callback(newExtractorLink(name, "السيرفر الكامل $ep", fullMaster, ExtractorLinkType.M3U8) {
+            callback(newExtractorLink(name, "الحلقة كاملة", fullMaster, ExtractorLinkType.M3U8) {
                 referer = mainUrl
                 quality = getQualityFromName("1080p")
             })
-            found = true
 
             // الترجمات والأصوات من master السيرفر الكامل — نجلب master بمرونة (مهلات/أعد)
             // حتى لا نعتمد على رحلة واحدة قد تهلة (السيرفر بطيء). نستخرج tracks إن نجحنا،
@@ -276,9 +261,36 @@ class ReelreeProvider : MainAPI() {
                     } catch (_: Exception) {}
                 }
             }
+            return true
         }
 
-        return found
+        // ===== المسار 2: الحلقات المنفصلة بالرقم — عبر data-media / %EP% =====
+        // روابط /api/{dx|rs}/{id}/{n}.m3u8 — رغم الامتداد .m3u8 المتشابه فإن المحتوى مختلف:
+        //   - /api/dx/*/{n}.m3u8 → ملف MP4 مباشر (ftypisom...)
+        //   - /api/rs/*/{n}.m3u8 → HLS حقيقي (#EXTM3U...)
+        // لذلك نفحص أول بايتات (range صغير سريع) لتحديد النوع الصحيح — إرسال HLS كـ VIDEO
+        // يفشل بـ UnrecognizedInputFormatException، وإرسال MP4 كـ HLS يفشل بـ Source error أيضًا.
+        val parts = data.split("|", limit = 2)
+        val template = parts.getOrNull(0)?.trim() ?: return false
+        val ep = parts.getOrNull(1)?.trim() ?: return false
+        if (template.isBlank() || !template.startsWith("http")) return false
+
+        val epUrl = template.replace("%EP%", ep)
+        return try {
+            val isHls = epUrl.endsWith(".m3u8") && runCatching {
+                val sig = app.get(epUrl, referer = mainUrl, headers = mapOf(
+                    "User-Agent" to UA,
+                    "Range" to "bytes=0-199"
+                )).text
+                sig.startsWith("#EXT") || sig.startsWith("#EXTM3U") || sig.contains("#EXT-X-")
+            }.getOrDefault(false)
+            callback(newExtractorLink(name, "الحلقة $ep", epUrl,
+                if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                referer = mainUrl
+                quality = getQualityFromName("720p")
+            })
+            true
+        } catch (e: Exception) { false }
     }
 
     private fun cleanTitle(t: String): String {
