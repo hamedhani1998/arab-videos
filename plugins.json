@@ -579,7 +579,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 41310,
+    "fileSize": 41345,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -589,7 +589,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 6,
+    "version": 7,
     "internalName": "OnShort",
     "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/OnShort.cs3",
@@ -620,7 +620,7 @@
     "iconUrl": "https://reelree.com/wp-content/uploads/2026/08/cropped-Screenshot-2026-08-16-075556-192x192.png",
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 22877,
+    "fileSize": 23741,
     "status": 1,
     "language": "ar",
     "authors": [

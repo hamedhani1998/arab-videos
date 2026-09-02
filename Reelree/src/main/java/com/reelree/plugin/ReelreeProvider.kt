@@ -36,12 +36,29 @@ class ReelreeProvider : MainAPI() {
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
+    // صف لكل منصة تجمعها Reelree — بدون حذف أي منصة. تأتي بعد الأقسام العامة.
+    private val platformRows = listOf(
+        "platform/netshort/" to "منصة NetShort",
+        "platform/dramabite/" to "منصة DramaBite",
+        "platform/dramabox/" to "منصة DramaBox",
+        "platform/reelshort/" to "منصة ReelShort",
+        "platform/goodshort/" to "منصة GoodShort",
+        "platform/shortmax/" to "منصة ShortMax",
+        "platform/flickreels/" to "منصة FlickReels",
+        "platform/flextv/" to "منصة FlexTV",
+        "platform/dramawave/" to "منصة DramaWave",
+        "platform/stardusttv/" to "منصة StarDustTV",
+    )
+
     override val mainPage = mainPageOf(
+        // الأقسام العامة
         "explore/" to "أحدث المسلسلات",
         "explore/?sort=trending" to "الأكثر مشاهدة",
         "tag/metarjam-arabi/" to "مترجم عربي",
         "tag/mudabalaj-arabi/" to "مدبلج عربي",
         "tag/lang-en/" to "بالإنجليزية",
+        // جميع المنصات (حسب الموقع /platforms/)
+        *platformRows.map { (path, label) -> path to label }.toTypedArray(),
     )
 
     private data class RrServer(

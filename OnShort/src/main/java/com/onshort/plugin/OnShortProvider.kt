@@ -73,6 +73,7 @@ class OnShortProvider : MainAPI() {
         "moborels" to "أحدث مسلسلات MoBorels",
         "shortswave" to "أحدث مسلسلات ShortsWave",
         "stardusttv" to "أحدث مسلسلات StardustTV",
+        "dotdrama" to "أحدث مسلسلات DotDrama",
         // ————— غير متاحة عبر OnShort (مرفوضة من سيربره) — تصل عبر مزود مستقل —————
         "netshort" to "NetShort (مزود مستقل)",
         "shortmax" to "ShortMax (مزود مستقل)",
