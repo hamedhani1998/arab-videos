@@ -76,8 +76,35 @@ class DeepDramaProvider : MainAPI() {
         val directVideo: String?,       // mp4 مباشر (Rumble فقط)
     )
     private data class ServerRendition(val url: String, val height: Int)
-    // ملف ترجمة: اسم اللغة + رابط .vtt
-    private data class SubtitleTrack(val label: String, val url: String)
+    // ملف ترجمة: اسم اللغة + رابط .vtt الأصل + المحتوى المُصحّح (إن أُصلح) كـ data: URI.
+    // الفيديوهات العائدة من vidaraa/Rumble تحمل الترجمة بصيغة "mojibake" (نص عربي
+    // فُسّر خطأً بـ latin-1 ثم أُعيد ترميزه UTF-8) فتظهر رموز مشوهة عند التشغيل.
+    // نُصحّح الترميز أثناء تدفئة الكاش ونمرّر inline حتى تعمل الترجمة عربية صحيحة.
+    private data class SubtitleTrack(val label: String, val url: String, val fixedData: String? = null)
+
+    // يُصحّح ترميز "mojibake المزدوج": النص المعروض كحروف لاتينية (مثل "Ù...") هو في الأصل
+    // بايتات UTF-8 لنص عربي فُسّرت كـ latin-1 ثم أُعيد ترميزها UTF-8 على الخادم.
+    // الاستعادة: تُخَطَّى السلسلة الحالية (unicode chars) على ISO-8859-1 لاسترجاع البايتات
+    // الأصلية، ثم تُفكَّ UTF-8 → النص العربي السليم.
+    private fun fixMojibake(mojibake: String): String {
+        return try { String(mojibake.toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8) } catch (_: Exception) { "" }
+    }
+
+    // يجلب ملف ترجمة .vtt ويُصحّح ترميزه (mojibake) إن لزم، معرّجًا نصًا inline (data: URI).
+    private suspend fun prepareSubtitle(sub: SubtitleTrack): SubtitleTrack {
+        if (sub.fixedData != null) return sub
+        return try {
+            // app.get().text فكّ الترميز وفق charset=utf-8 (لا يُفقد البايتات كحروف لاتينية)
+            val text = app.get(sub.url, headers = headers()).text
+            val fixed = fixMojibake(text)
+            // نستخدم الفك المزدوج فقط عندما يكشف نصًا عربيًا (وإلا أبقِ النص الأصلي)
+            val adjusted = if (Regex("""[أ-ي]""").containsMatchIn(fixed) &&
+                !Regex("""[أ-ي]""").containsMatchIn(text)) fixed else text
+            val dataUri = "data:text/vtt;base64," +
+                android.util.Base64.encodeToString(adjusted.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+            sub.copy(fixedData = dataUri)
+        } catch (_: Exception) { sub }
+    }
 
     // تخزين مؤقت لنتائج فكّ كل خادم حسب مصدره (رابط التضمين أو filecode).
     // الجلب يتم مرة واحدة أثناء عرض التفاصيل، فيُعاد استخدامه فورًا عند التشغيل.
@@ -135,11 +162,13 @@ class DeepDramaProvider : MainAPI() {
 
         // Rumble: لا نجعل الجودات الفردية خيارات تشغيل (chunklists غير موثوقة)
         // — نقدم الـ master التكيفي فقط كخيار فيديو آمن، مع mp4 والصوت.
+        // نُصحّح ترميز الترجمة (mojibake) وتخزّن inline حتى تظهر عربية صحيحة.
+        val fixedSubs = subs.map { prepareSubtitle(it) }
         val resolved = ServerResolved(
             name = "Rumble",
             hls = hls,
             renditions = emptyList(),  // الجودات الفردية غير موثوقة عند Rumble
-            subtitles = subs,
+            subtitles = fixedSubs,
             audio = aac,
             directVideo = mp4,
         )
@@ -216,11 +245,13 @@ class DeepDramaProvider : MainAPI() {
             } catch (_: Exception) { renditions = emptyList() }
         }
 
+        // نُصحّح ترميز الترجمة (mojibake) وتخزّن inline قبل التشغيل.
+        val fixedSubs = subs.map { prepareSubtitle(it) }
         val resolved = ServerResolved(
             name = "vidaraa",
             hls = streamUrl,
             renditions = renditions,
-            subtitles = subs,
+            subtitles = fixedSubs,
             audio = null,
             directVideo = null,
         )
@@ -437,9 +468,13 @@ class DeepDramaProvider : MainAPI() {
             })
         }
 
-        // 5) ملفات الترجمة (كل لغة يوفّرها الخادم).
+        // 5) ملفات الترجمة (كل لغة يوفّرها الخادم). نمرّر النص المُصحّح inline إن
+        // توفر (تجنب موجيبيك الرموز المشوهة على الشاشة)، وإلا الرابط الأصلي.
         server.subtitles.forEach { sub ->
-            try { subtitleCallback(newSubtitleFile(sub.label, sub.url)) } catch (_: Exception) {}
+            try {
+                val url = sub.fixedData ?: sub.url
+                subtitleCallback(newSubtitleFile(sub.label, url))
+            } catch (_: Exception) {}
         }
     }
 
