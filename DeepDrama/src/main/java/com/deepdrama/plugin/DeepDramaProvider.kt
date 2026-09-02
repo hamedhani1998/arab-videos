@@ -61,6 +61,82 @@ class DeepDramaProvider : MainAPI() {
 
     private fun headers() = mapOf("User-Agent" to DD_UA)
 
+    // نتيجة فكّ روابط Rumble: master التكيفي + الجودات + mp4 المباشر + صوت + الترجمات.
+    private data class RumbleResolved(
+        val hls: String?,
+        val renditions: List<RumbleRendition>,
+        val mp4: String?,
+        val aac: String?,
+        val subtitles: List<SubtitleTrack>,
+    )
+    private data class RumbleRendition(val url: String, val height: Int, val bandwidth: Int)
+    // ملف ترجمة من صفحة Rumble: اسم اللغة بالعربية + رابط .vtt.
+    private data class SubtitleTrack(val label: String, val url: String)
+
+    // تخزين مؤقت لنتائج فكّ روابط Rumble حسب رابط التضمين.
+    // جلب صفحة التضمين + الـ master بطيء؛ نجلبهما مرة واحدة لكل مسلسل (أثناء عرض التفاصيل)
+    // ثم نعيد استخدامهما فورًا عند التشغيل، فيظهر الـ master والجودات بلا انتظار.
+    private val rumbleResolveCache =
+        java.util.concurrent.ConcurrentHashMap<String, RumbleResolved>()
+
+    // يحلل الجودات من master playlist: كل سطر #EXT-X-STREAM-INF يعطينا دقة/رابط.
+    private fun parseRumbleRenditions(master: String): List<RumbleRendition> {
+        val out = mutableListOf<RumbleRendition>()
+        val lines = master.lines()
+        for (i in 0 until lines.size - 1) {
+            val inf = lines[i].trim()
+            if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
+            val url = lines[i + 1].trim()
+            if (!url.startsWith("http")) continue
+            val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val bandwidth = Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            out.add(RumbleRendition(url, height, bandwidth))
+        }
+        return out.distinctBy { it.url }
+    }
+
+    /** يجلب روابط Rumble (مخزّنة) — مرة واحدة ثم يُعاد استخدامها. */
+    private suspend fun resolveRumble(embedUrl: String): RumbleResolved {
+        rumbleResolveCache[embedUrl]?.let { return it }
+        val html = app.get(embedUrl, headers = headers()).text
+        val cleaned = html.replace("\\/", "/")
+        val hls = Regex("""https://rumble\.com/[^"'\s<>]*?/playlist\.m3u8""").find(cleaned)?.value
+        val mp4 = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.mp4""").find(cleaned)?.value
+        val aac = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.aac""").find(cleaned)?.value
+        // لجلب الجودات الفردية نقرأ master (على rumble.com — سريع نسبيًا)
+        var renditions = emptyList<RumbleRendition>()
+        if (hls != null) {
+            try {
+                val masterText = app.get(hls, headers = headers(), referer = "$DD_MAIN/").text
+                renditions = parseRumbleRenditions(masterText)
+            } catch (_: Exception) { renditions = emptyList() }
+        }
+        // الترجمات: Rumble يعرضها في كائن "cc":{lang:{language,path(.vtt)}}. بعض الفيديوهات
+        // توفر ترجمة عربية (وأحياناً لغات أخرى)، وبعضها لا يوفر أي ترجمة.
+        val subs = mutableListOf<SubtitleTrack>()
+        try {
+            val ccIdx = cleaned.indexOf("\"cc\"")
+            if (ccIdx >= 0) {
+                val ccStart = cleaned.indexOf('{', ccIdx)
+                val ccNode = mapper.readTree(cleaned.substring(ccStart, cleaned.length.coerceAtMost(ccStart + 4000)))
+                if (ccNode != null && ccNode.isObject) {
+                    ccNode.fields().forEach { (lang, info) ->
+                        val path = info.get("path")?.asText()?.takeIf { it.isNotBlank() }
+                        val langName = info.get("language")?.asText().orEmpty()
+                        if (path != null) {
+                            subs.add(SubtitleTrack(langName.ifBlank { lang }, path))
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) { /* لا توجد ترجمة لهذا الفيديو */ }
+
+        val resolved = RumbleResolved(hls, renditions, mp4, aac, subs)
+        rumbleResolveCache[embedUrl] = resolved
+        return resolved
+    }
+
     private fun cleanTitle(title: String?): String? {
         if (title.isNullOrBlank()) return null
         val base = titleSiteSuffixRe.replace(title, "").trim()
@@ -207,6 +283,13 @@ class DeepDramaProvider : MainAPI() {
             // نفضّل Rumble لأنه قابل للتشغيل المباشر
             val rumble = servers.firstOrNull { it.contains("rumble.com") }
             val primary = rumble ?: servers.first()
+
+            // غيّث تخزين روابط Rumble الآن (أثناء عرض صفحة التفاصيل) حتى يكون
+            // التشغيل فوريًا عند الضغط على الحلقة — لا انتظار لجلب صفحة التضمين وقت التشغيل.
+            if (rumble != null) {
+                try { resolveRumble(rumble.substringBefore("?")) } catch (_: Exception) {}
+            }
+
             val episode = newEpisode(primary) {
                 name = "الحلقة الكاملة"
                 episode = 1
@@ -239,46 +322,58 @@ class DeepDramaProvider : MainAPI() {
             var url0 = data
             if (url0.isBlank()) return false
 
-            // Rumble: نستخرج master (يجمع كل الجودات) ومقطع mp4 مباشر ومقطع صوت مستقل.
-            // لا نجلب master هنا داخل نافذة loadLinks الضيقة — نعتمد على الرابط نفسه
-            // (التكيفي) حتى لا يتأخر التشغيل. الجودات تُعرض عبر النسخة الكاملة.
+            // Rumble: نقدم جودات التشغيل الفعلية مثل الموقع + نسخة تكيفية تشمل كل الجودات.
+            // النتيجة مخزّنة (تُجلَب مرة واحدة أثناء عرض التفاصيل) فلا ينتظر التشغيل.
             if (url0.contains("rumble.com")) {
                 val embedUrl = url0.substringBefore("?")
-                val html = app.get(embedUrl, headers = headers()).text
-                val cleaned = html.replace("\\/", "/")
-                // master playlist الرئيسي — يجمع جميع الجودات (480p/360p...) ويتكيف تلقائيًا
-                val hls = Regex("""https://rumble\.com/[^"'\s<>]*?/playlist\.m3u8""").find(cleaned)?.value
-                // مقطع mp4 مباشر (جودة واحدة)
-                val vid = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.mp4""").find(cleaned)?.value
-                // ملف الصوت المستقل (aac)
-                val aud = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.aac""").find(cleaned)?.value
+                val resolved = resolveRumble(embedUrl)
 
-                // الرابط الأساسي = master التكيفي (يحتوي كل الجودات ويختار الأنسب تلقائيًا)
-                if (!hls.isNullOrBlank()) {
-                    callback(newExtractorLink(name, "Rumble · جميع الجودات", hls, ExtractorLinkType.M3U8) {
+                val hlsUrl = resolved.hls
+                if (resolved.renditions.isNotEmpty() && hlsUrl != null) {
+                    // كل جودة كخيار منفصل (مثل الموقع): 480p, 360p...
+                    resolved.renditions.sortedBy { it.height }.forEach { r ->
+                        callback(newExtractorLink(name, "Rumble ${r.height}p", r.url, ExtractorLinkType.M3U8) {
+                            this.quality = getQualityFromName("${r.height}p")
+                            this.headers = headers()
+                        })
+                    }
+                    // النسخة التكيفية: تشمل كل الجودات وتتبدل تلقائيًا مع سرعة النت
+                    callback(newExtractorLink(name, "Rumble · جميع الجودات", hlsUrl, ExtractorLinkType.M3U8) {
+                        this.quality = getQualityFromName("${resolved.renditions.maxOf { it.height }}p")
+                        this.headers = headers()
+                    })
+                } else if (hlsUrl != null) {
+                    // لم تُقرأ الجودات — نقدم master التكيفي كاملًا
+                    callback(newExtractorLink(name, "Rumble · جميع الجودات", hlsUrl, ExtractorLinkType.M3U8) {
                         this.quality = getQualityFromName("720p")
                         this.headers = headers()
                     })
                 }
 
-                // مقطع mp4 مباشر — بديل آمن (إذا لم يعمل HLS)
-                if (vid != null) {
-                    callback(newExtractorLink(name, "Rumble MP4", vid, ExtractorLinkType.VIDEO) {
+                // مقطع mp4 مباشر — بديل فيديو آمن
+                if (resolved.mp4 != null) {
+                    callback(newExtractorLink(name, "Rumble MP4", resolved.mp4, ExtractorLinkType.VIDEO) {
                         this.quality = getQualityFromName("720p")
                         this.headers = headers()
                     })
                 }
 
-                // صوت فقط (aac) — عند وجود مسار صوت مستقل
-                if (aud != null) {
-                    callback(newExtractorLink(name, "صوت فقط", aud, ExtractorLinkType.VIDEO) {
+                // صيغة الصوت (AAC) — الموقع يوفّر مسار صوت واحد مستقل فقط.
+                if (resolved.aac != null && resolved.hls != null) {
+                    callback(newExtractorLink(name, "صوت AAC", resolved.aac, ExtractorLinkType.VIDEO) {
                         this.quality = getQualityFromName("720p")
                         this.headers = headers()
                     })
                 }
 
-                // الترجمة/الصوت المتعدد: Rumble يضمّن صوتًا واحدًا داخل المقطع، ولا يوفر
-                // ملفات ترجمة منفصلة (subtitle) على هذا الموقع — لذلك لا شيء يُضاف هنا.
+                // ملفات الترجمة (WebVTT) — متوفرة لدى بعض فيديوهات Rumble (عربية غالبًا).
+                // نعرض كل لغة يوفّرها الفيديو.
+                resolved.subtitles.forEach { sub ->
+                    try {
+                        subtitleCallback(newSubtitleFile(sub.label, sub.url))
+                    } catch (_: Exception) {}
+                }
+
                 return true
             }
 
