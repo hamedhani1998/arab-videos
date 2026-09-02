@@ -158,13 +158,30 @@ class MinuteDramaProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
-            // ترميز الاستعلام بشكل صحيح — مهم جدًا للأسماء العربية (بدونه يظهر البحث فارغًا)
+            // البحث يعمل عبر الوسم ?q= (وليس keyword= الذي يعيد قائمة ثابتة)
+            // وترميز الاستعلام إلزامي للأسماء العربية
             val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
             val doc = app.get(
-                "$mainUrl/search?keyword=$encoded",
+                "$mainUrl/search?q=$encoded",
                 referer = "$mainUrl/"
             ).document
-            parseCards(doc)
+            // نتائج البحث في بطاقات عامة a[href*=/tv-desc/] — نستخرج الغلاف والاسم العربي منها
+            val results = mutableListOf<SearchResponse>()
+            val seen = mutableSetOf<String>()
+            doc.select("a[href*=/tv-desc/]").forEach { a ->
+                val href = a.attr("href").ifBlank { return@forEach }
+                if (href in seen) return@forEach
+                val img = a.selectFirst("img[alt]") ?: a.selectFirst("img") ?: return@forEach
+                val title = img.attr("alt").trim().ifBlank { return@forEach }
+                // لا نأخذ صور الافتراضي/الأيقونات الصغيرة، بل غلاف المسلسل
+                val poster = img.attr("data-src").ifBlank { img.attr("src") }
+                    .takeIf { it.isNotBlank() && !it.endsWith("default.png") }
+                seen.add(href)
+                results.add(newMovieSearchResponse(title, "$origin$href", TvType.TvSeries) {
+                    this.posterUrl = poster
+                })
+            }
+            results
         } catch (e: Exception) { null }
     }
 
