@@ -21,25 +21,39 @@ private val mapper = ObjectMapper().registerKotlinModule()
  *      episodeVideoUrl → mp4 مباشر (720p) من cdn3.minutedrama.com
  *      bkEpisodeVideoUrl → نسخة احتياطية من cdn4
  *      textTrackUrl → ترجمة VTT (ar/en)
- *  - التصنيفات: GET /en/categoryTvs/{id}/pageNum/{page} → JSON tvs[]
+ *  - التصنيفات: POST /en/categoryTvs/{id}/pageNum/{page} → JSON tvs[]
  *      (API التصنيفات تعمل فقط مع /en/)
+ *
+ * القاعدة الأساسية = القسم العربي: https://minutedrama.com/ar
  */
 class MinuteDramaProvider : MainAPI() {
     override var name = "MinuteDrama"
-    override var mainUrl = "https://minutedrama.com"
+    override var mainUrl = "https://minutedrama.com/ar" // القاعدة: القسم العربي
     override var lang = "ar"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    private val loc = "ar" // locale للتصفّح والبحث
-    private val apiLoc = "en" // locale لـ API التصنيفات (يعمل مع /en/ فقط)
+    private val origin = "https://minutedrama.com"
+    private val apiLoc = "en" // API التصنيفات يعمل مع /en/ فقط
 
-    // قسم واحد فقط: "دراما إنجليزية" — واجهة عربية
-    private val englishCat = "96"
+    // أقسام الموقع العربي — من الصفحة الرئيسية العربية
+    private val categories = listOf(
+        "96" to "دراما إنجليزية",
+        "73" to "انتقام",
+        "98" to "حب",
+        "1" to "ملياردير",
+        "26" to "رئيس تنفيذي",
+        "33" to "نساء مستقلات",
+        "35" to "سيدة المجتمع",
+        "59" to "نمو ذاتي",
+        "70" to "هوية مخفية",
+        "75" to "رومانسية تعاقدية",
+        "77" to "حب بعد الزواج",
+    )
 
     override val mainPage = mainPageOf(
-        englishCat to "دراما إنجليزية"
+        *categories.map { (id, label) -> id to label }.toTypedArray()
     )
 
     /** يحلل بطاقات المسلسلات من الصفحة. */
@@ -55,7 +69,7 @@ class MinuteDramaProvider : MainAPI() {
             val img = a.selectFirst("img") ?: return@forEach
             val title = img.attr("alt").trim().ifBlank { return@forEach }
             val poster = img.attr("data-src").ifBlank { img.attr("src") }.ifBlank { null }
-            results.add(newMovieSearchResponse(title, "$mainUrl$href", TvType.TvSeries) {
+            results.add(newMovieSearchResponse(title, "$origin$href", TvType.TvSeries) {
                 this.posterUrl = poster
             })
         }
@@ -71,7 +85,7 @@ class MinuteDramaProvider : MainAPI() {
             val poster = a.selectFirst("img")?.let {
                 it.attr("data-src").ifBlank { it.attr("src") }
             }?.ifBlank { null }
-            results.add(newMovieSearchResponse(title, "$mainUrl$href", TvType.TvSeries) {
+            results.add(newMovieSearchResponse(title, "$origin$href", TvType.TvSeries) {
                 this.posterUrl = poster
             })
         }
@@ -89,7 +103,7 @@ class MinuteDramaProvider : MainAPI() {
             val poster = parent.selectFirst("img")?.let {
                 it.attr("data-src").ifBlank { it.attr("src") }
             }?.ifBlank { null }
-            results.add(newMovieSearchResponse(title, "$mainUrl$href", TvType.TvSeries) {
+            results.add(newMovieSearchResponse(title, "$origin$href", TvType.TvSeries) {
                 this.posterUrl = poster
             })
         }
@@ -113,8 +127,8 @@ class MinuteDramaProvider : MainAPI() {
         return try {
             val catId = request.data
             val json = app.post(
-                "$mainUrl/$apiLoc/categoryTvs/$catId/pageNum/$page",
-                referer = "$mainUrl/$loc/",
+                "$origin/$apiLoc/categoryTvs/$catId/pageNum/$page",
+                referer = "$mainUrl/",
                 headers = mapOf("Content-Type" to "application/json")
             ).text
             val tree = mapper.readTree(json)
@@ -123,11 +137,11 @@ class MinuteDramaProvider : MainAPI() {
                 val id = tv.get("id")?.asInt() ?: return@mapNotNull null
                 val title = tv.get("title")?.asText() ?: return@mapNotNull null
                 val cover = tv.get("coverUrl")?.asText()
-                val slug = tv.get("title")?.asText()?.lowercase()
-                    ?.replace(Regex("[^a-z0-9\\s-]"), "")
-                    ?.replace(Regex("\\s+"), "-")
-                    ?.replace(Regex("-+"), "-")?.trim('-') ?: ""
-                newMovieSearchResponse(title, "$mainUrl/$loc/tv-desc/$slug/$id", TvType.TvSeries) {
+                val slug = title.lowercase()
+                    .replace(Regex("[^a-z0-9\\s-]"), "")
+                    .replace(Regex("\\s+"), "-")
+                    .replace(Regex("-+"), "-").trim('-')
+                newMovieSearchResponse(title, "$origin/ar/tv-desc/$slug/$id", TvType.TvSeries) {
                     this.posterUrl = cover
                 }
             }
@@ -138,8 +152,8 @@ class MinuteDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val doc = app.get(
-                "$mainUrl/$loc/search?keyword=${query.trim().replace(" ", "+")}",
-                referer = "$mainUrl/$loc/"
+                "$mainUrl/search?keyword=${query.trim().replace(" ", "+")}",
+                referer = "$mainUrl/"
             ).document
             parseCards(doc)
         } catch (e: Exception) { null }
@@ -147,7 +161,7 @@ class MinuteDramaProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val doc = app.get(url, referer = "$mainUrl/$loc/").document
+            val doc = app.get(url, referer = "$mainUrl/").document
             val pageSource = doc.html()
 
             // استخراج معرف المسلسل من URL (آخر أرقام بعد آخر /)
@@ -166,7 +180,7 @@ class MinuteDramaProvider : MainAPI() {
             // الصورة
             val tvIdFromJson = jsonArr.firstOrNull()?.get("tvId")?.asInt() ?: tvId
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: tvIdFromJson?.let { "https://minutedrama.com/cover/${it}_en.jpg" }
+                ?: tvIdFromJson?.let { "$origin/cover/${it}_en.jpg" }
 
             // الوصف
             val plot = doc.selectFirst("meta[name=description]")?.attr("content")
@@ -202,7 +216,7 @@ class MinuteDramaProvider : MainAPI() {
             val epNum = parts[2].trim().toIntOrNull() ?: return false
 
             // نجلب صفحة التفاصيل من جديد للحصول على روابط طازجة (التوكن ينتهي)
-            val doc = app.get("$mainUrl/$loc/tv-desc/x/$tvId", referer = "$mainUrl/$loc/").document
+            val doc = app.get("$mainUrl/tv-desc/x/$tvId", referer = "$mainUrl/").document
             val jsonArr = extractEpisodeJson(doc.html()) ?: return false
 
             val ep = jsonArr.find { it.get("episodeNum")?.asInt() == epNum } ?: return false
@@ -214,7 +228,7 @@ class MinuteDramaProvider : MainAPI() {
             // مصدر الرئيسي — MP4 مباشر
             videoUrl?.let {
                 callback(newExtractorLink(name, "الحلقة $epNum", it, ExtractorLinkType.VIDEO) {
-                    referer = "$mainUrl/$loc/"
+                    referer = "$mainUrl/"
                     quality = getQualityFromName("720p")
                 })
             }
@@ -222,7 +236,7 @@ class MinuteDramaProvider : MainAPI() {
             // مصدر احتياطي — CDN4
             backupUrl?.let {
                 callback(newExtractorLink(name, "الحلقة $epNum (احتياطي)", it, ExtractorLinkType.VIDEO) {
-                    referer = "$mainUrl/$loc/"
+                    referer = "$mainUrl/"
                     quality = getQualityFromName("720p")
                 })
             }
