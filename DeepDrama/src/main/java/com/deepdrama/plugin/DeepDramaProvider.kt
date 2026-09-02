@@ -229,25 +229,6 @@ class DeepDramaProvider : MainAPI() {
                 .find(html)?.value
     }
 
-    /** يقرأ روابط الجودات من master playlist (Rumble) — كل سطر STREAM-INF يعطينا دقة. */
-    private data class RumbleRendition(val url: String, val height: Int, val bandwidth: Int)
-
-    private fun parseRumbleRenditions(master: String): List<RumbleRendition> {
-        val out = mutableListOf<RumbleRendition>()
-        val lines = master.lines()
-        for (i in 0 until lines.size - 1) {
-            val inf = lines[i].trim()
-            if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
-            val url = lines[i + 1].trim()
-            if (!url.startsWith("http")) continue
-            val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull()
-            val bandwidth = Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            out.add(RumbleRendition(url, height ?: 0, bandwidth))
-        }
-        return out
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -258,54 +239,29 @@ class DeepDramaProvider : MainAPI() {
             var url0 = data
             if (url0.isBlank()) return false
 
-            // Rumble: نستخرج master (كل الجودات) ومقطع mp4 مباشر ومقطع صوت مستقل
+            // Rumble: نستخرج master (يجمع كل الجودات) ومقطع mp4 مباشر ومقطع صوت مستقل.
+            // لا نجلب master هنا داخل نافذة loadLinks الضيقة — نعتمد على الرابط نفسه
+            // (التكيفي) حتى لا يتأخر التشغيل. الجودات تُعرض عبر النسخة الكاملة.
             if (url0.contains("rumble.com")) {
                 val embedUrl = url0.substringBefore("?")
                 val html = app.get(embedUrl, headers = headers()).text
                 val cleaned = html.replace("\\/", "/")
-                // master playlist الرئيسي — يجمع جميع الجودات (720p/480p/360p)
+                // master playlist الرئيسي — يجمع جميع الجودات (480p/360p...) ويتكيف تلقائيًا
                 val hls = Regex("""https://rumble\.com/[^"'\s<>]*?/playlist\.m3u8""").find(cleaned)?.value
                 // مقطع mp4 مباشر (جودة واحدة)
                 val vid = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.mp4""").find(cleaned)?.value
                 // ملف الصوت المستقل (aac)
                 val aud = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.aac""").find(cleaned)?.value
 
+                // الرابط الأساسي = master التكيفي (يحتوي كل الجودات ويختار الأنسب تلقائيًا)
                 if (!hls.isNullOrBlank()) {
-                    // نقرأ master لنعرض كل جودة كخيار منفصل
-                    val masterText = try {
-                        app.get(hls, headers = headers(), referer = "$DD_MAIN/").text
-                    } catch (_: Exception) { null }
-                    val renditions = if (masterText != null) parseRumbleRenditions(masterText) else emptyList()
-
-                    if (renditions.isNotEmpty()) {
-                        // كل جودة كرابط مستقل (Rumble: كل واحد مدمج فيه صوته)
-                        renditions.sortedBy { it.height }.forEach { r ->
-                            callback(newExtractorLink(
-                                name,
-                                "Rumble ${r.height}p",
-                                r.url,
-                                ExtractorLinkType.M3U8
-                            ) {
-                                this.quality = getQualityFromName("${r.height}p")
-                                this.headers = headers()
-                            })
-                        }
-                        // الرابط التكيفي الكامل: يشمل كل الجودات ويتبدل تلقائيًا مع سرعة النت
-                        val best = renditions.maxByOrNull { it.height }?.height ?: 1080
-                        callback(newExtractorLink(name, "Rumble · جميع الجودات", hls, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName("${best}p")
-                            this.headers = headers()
-                        })
-                    } else {
-                        // لم تُقرأ الجودات — نقدم master كاملاً (تكيفي)
-                        callback(newExtractorLink(name, "Rumble HLS", hls, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName("720p")
-                            this.headers = headers()
-                        })
-                    }
+                    callback(newExtractorLink(name, "Rumble · جميع الجودات", hls, ExtractorLinkType.M3U8) {
+                        this.quality = getQualityFromName("720p")
+                        this.headers = headers()
+                    })
                 }
 
-                // مقطع mp4 مباشر — خيار إضافي (عندما لا يعمل HLS أحيانًا)
+                // مقطع mp4 مباشر — بديل آمن (إذا لم يعمل HLS)
                 if (vid != null) {
                     callback(newExtractorLink(name, "Rumble MP4", vid, ExtractorLinkType.VIDEO) {
                         this.quality = getQualityFromName("720p")
@@ -321,7 +277,7 @@ class DeepDramaProvider : MainAPI() {
                     })
                 }
 
-                // الترجمة/الصوت: Rumble يضمّن صوتًا واحدًا داخل المقطع، ولا يوفر
+                // الترجمة/الصوت المتعدد: Rumble يضمّن صوتًا واحدًا داخل المقطع، ولا يوفر
                 // ملفات ترجمة منفصلة (subtitle) على هذا الموقع — لذلك لا شيء يُضاف هنا.
                 return true
             }

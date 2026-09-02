@@ -609,7 +609,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 2,
+    "version": 3,
     "internalName": "DeepDrama",
     "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/DeepDrama.cs3",
