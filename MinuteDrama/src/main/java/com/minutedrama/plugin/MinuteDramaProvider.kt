@@ -35,23 +35,11 @@ class MinuteDramaProvider : MainAPI() {
     private val loc = "ar" // locale للتصفّح والبحث
     private val apiLoc = "en" // locale لـ API التصنيفات (يعمل مع /en/ فقط)
 
-    // التصنيفات المعروضة في الصفحة الرئيسية — أسماء عربية من الموقع
-    private val categories = listOf(
-        "96" to "دراما إنجليزية",
-        "73" to "انتقام",
-        "98" to "حب",
-        "1" to "ملياردير",
-        "26" to "رئيس تنفيذي",
-        "33" to "نساء مستقلات",
-        "35" to "سيدة المجتمع",
-        "59" to "نمو ذاتي",
-        "70" to "هوية مخفية",
-        "75" to "رومانسية تعاقدية",
-        "77" to "حب بعد الزواج",
-    )
+    // قسم واحد فقط: "دراما إنجليزية" — واجهة عربية
+    private val englishCat = "96"
 
     override val mainPage = mainPageOf(
-        *categories.map { (id, label) -> id to label }.toTypedArray()
+        englishCat to "دراما إنجليزية"
     )
 
     /** يحلل بطاقات المسلسلات من الصفحة. */
@@ -186,11 +174,11 @@ class MinuteDramaProvider : MainAPI() {
 
             // إنشاء الحلقات
             val episodes = jsonArr.mapNotNull { ep ->
-                val epNum = ep.get("episodeNum")?.asInt() ?: return@mapNotNull null
-                val epTitle = ep.get("episodeTitle")?.asText() ?: "Episode $epNum"
+                val epNum = ep.get("episodeNum")?.asInt()
+                    ?: return@mapNotNull null
                 newEpisode("$mainUrl/ep|$tvId|$epNum") {
-                    episode = epNum
-                    name = epTitle
+                    this.episode = epNum
+                    this.name = "الحلقة $epNum"
                 }
             }.sortedBy { it.episode }
 
@@ -240,13 +228,12 @@ class MinuteDramaProvider : MainAPI() {
             }
 
             // ترجمة عربية — من رابط VTT العربي
-            subtitleUrlAr?.let {
-                subtitleCallback(newSubtitleFile("العربية", it))
-            }
+            try { subtitleUrlAr?.let { subtitleCallback(newSubtitleFile("العربية", it)) } } catch (_: Exception) {}
 
-            // ترجمة إنجليزية — نستبدل ar بـ en في الرابط
-            subtitleUrlAr?.replace("/ar/", "/en/")?.replace("_ar.vtt", "_en.vtt")?.let {
-                subtitleCallback(newSubtitleFile("English", it))
+            // ترجمة إنجليزية — نستبدل ar بـ en في الرابط (إن تغيّر الرابط فعلًا)
+            val subtitleUrlEn = subtitleUrlAr?.replace("/ar/", "/en/")?.replace("_ar.vtt", "_en.vtt")
+            if (subtitleUrlEn != null && subtitleUrlEn != subtitleUrlAr) {
+                try { subtitleCallback(newSubtitleFile("English", subtitleUrlEn)) } catch (_: Exception) {}
             }
 
             true
