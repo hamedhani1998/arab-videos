@@ -727,11 +727,12 @@ class OnShortProvider : MainAPI() {
             //    (FreeReels مثلًا يرد 500 Internal Server Error — لا جدوى من تكرار 4 مرات.)
             val notHandled = msg.contains("REST bridge") || msg.contains("not handled")
             val refreshFail = msg.contains("refresh failed") && Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg)
-            // أخطاء خادم غير قابلة للاسترداد — لا نعيد المحاولة 4 مرات بطيئة (تأخير العرض):
-            //  - "already running": تحديث وسائط المزود قيد التنفيذ — لن ينجح إذا أعدنا المحاولة
-            //  - "Media refresh failed": مصدر المنصة معطّل — تكرارها يُبطئ فقط
-            val busyFail = msg.contains("already running") || msg.contains("Media refresh failed")
-            val permanentReject = notHandled || refreshFail || busyFail
+            // رفضٌ نهائي حقيقي = المزود مرفوض من الوسيط (REST bridge/not handled) أو مصدره
+            // معطّل نهائيًا (Media refresh failed + HTTP 5xx). هذه لا جدوى من إعادتها.
+            val permanentReject = notHandled || refreshFail
+            // "MoboRels media refresh is already running" = الوسيط يقوم حاليًا بتحديث وسائط
+            // MoBoRels؛ هذه حالة مؤقتة — إعادة المحاولة بعد لحظة قد تنجح (المزود يعمل على
+            // الموقع فعلًا). لذا لا نعاملها كرفض نهائي، بل نستمر في المحاولة حتى الـ limit.
             val hasFresh = newTicket != null
             val canRetry = (attempt < 3) && !permanentReject
             val fullUrl = node.get("url")?.asText().orEmpty()
@@ -741,6 +742,9 @@ class OnShortProvider : MainAPI() {
                     if (msg.isNotBlank()) logE("OnShort.fetchEpisode final reject: $msg")
                     return null
                 }
+                // تأخير قصير إضافي قبل إعادة المحاولة — إتاحة للوسيط إنهاء "refresh already running"
+                // (خاصة MoBoRels) قبل الطلب التالي.
+                try { Thread.sleep(600L * (attempt + 1)) } catch (_: InterruptedException) {}
                 continue
             }
             // نجاح: احفظ التذكرة الجديدة لبقية الحلقات (بلا جلب صفحة)
