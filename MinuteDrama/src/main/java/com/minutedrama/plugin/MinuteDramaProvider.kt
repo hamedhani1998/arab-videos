@@ -12,55 +12,49 @@ private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
 /**
- * MinuteDrama — موقع دراما قصيرة إنجليزية (cdn3.minutedrama.com).
+ * MinuteDrama — موقع دراما قصيرة (cdn3.minutedrama.com).
  *
  * بنية الموقع:
  *  - القوائم: a.md-card → img[data-src] poster + img[alt] title
- *  - البحث: /en/search?keyword=... → a.drama-card-popular
- *  - التفاصيل: /en/tv-desc/{slug}/{id} — يحتوي مصفوفة JSON مدمجة بالحلقات
+ *  - البحث: /ar/search?keyword=... → a.drama-card-popular
+ *  - التفاصيل: /ar/tv-desc/{slug}/{id} — يحتوي مصفوفة JSON مدمجة بالحلقات
  *      episodeVideoUrl → mp4 مباشر (720p) من cdn3.minutedrama.com
  *      bkEpisodeVideoUrl → نسخة احتياطية من cdn4
- *      textTrackUrl → ترجمة VTT من sf.minutedrama.com
- *  - التصنيفات: POST /en/categoryTvs/{id}/pageNum/{page} → JSON tvs[]
+ *      textTrackUrl → ترجمة VTT (ar/en)
+ *  - التصنيفات: GET /en/categoryTvs/{id}/pageNum/{page} → JSON tvs[]
+ *      (API التصنيفات تعمل فقط مع /en/)
  */
 class MinuteDramaProvider : MainAPI() {
     override var name = "MinuteDrama"
     override var mainUrl = "https://minutedrama.com"
-    override var lang = "en"
+    override var lang = "ar"
     override val hasMainPage = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    // التصنيفات المعروضة في الصفحة الرئيسية — مع أسماء عربية
+    private val loc = "ar" // locale للتصفّح والبحث
+    private val apiLoc = "en" // locale لـ API التصنيفات (يعمل مع /en/ فقط)
+
+    // التصنيفات المعروضة في الصفحة الرئيسية — أسماء عربية من الموقع
     private val categories = listOf(
-        "100" to "جديد",
-        "96" to "بالإنجليزية",
-        "73" to "الانتقام",
-        "98" to "الحب",
-        "1" to "الملياردير",
-        "26" to "المدير التنفيذي",
-        "33" to "المرأة المستقلة",
-        "35" to "الراقصة الاجتماعية",
-        "59" to "النمو الذاتي",
-        "70" to "الهوية المخفية",
-        "75" to "الرومانسية التعاقدية",
-        "77" to "الحب بعد الزواج",
+        "96" to "دراما إنجليزية",
+        "73" to "انتقام",
+        "98" to "حب",
+        "1" to "ملياردير",
+        "26" to "رئيس تنفيذي",
+        "33" to "نساء مستقلات",
+        "35" to "سيدة المجتمع",
+        "59" to "نمو ذاتي",
+        "70" to "هوية مخفية",
+        "75" to "رومانسية تعاقدية",
+        "77" to "حب بعد الزواج",
     )
 
     override val mainPage = mainPageOf(
         *categories.map { (id, label) -> id to label }.toTypedArray()
     )
 
-    /** يحوّل عنوان المسلسل إلى slug مناسب لعنوان URL. */
-    private fun titleToSlug(title: String): String {
-        return title.lowercase()
-            .replace(Regex("[^a-z0-9\\s-]"), "")
-            .replace(Regex("\\s+"), "-")
-            .replace(Regex("-+"), "-")
-            .trim('-')
-    }
-
-    /** يحلل بطاقات المسلسلات من الصفحة (yd-main-page cards + search results). */
+    /** يحلل بطاقات المسلسلات من الصفحة. */
     private fun parseCards(doc: Document): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
         val seen = mutableSetOf<String>()
@@ -130,16 +124,9 @@ class MinuteDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val catId = request.data
-            // الطلب الأول (page=1): نجلب الصفحة الرئيسية ونحلل البطاقات المدمجة مباشرة
-            // الطلبات التالية (page>1): نستخدم API التصنيفات
-            if (page <= 1) {
-                val doc = app.get(mainUrl, referer = mainUrl).document
-                val items = parseCards(doc)
-                return if (items.isNotEmpty()) newHomePageResponse(request.name, items) else null
-            }
             val json = app.get(
-                "$mainUrl/en/categoryTvs/$catId/pageNum/$page",
-                headers = mapOf("Referer" to "$mainUrl/en/")
+                "$mainUrl/$apiLoc/categoryTvs/$catId/pageNum/$page",
+                referer = "$mainUrl/$loc/"
             ).text
             val tree = mapper.readTree(json)
             val tvs = tree.get("dataResult")?.get("tvs") ?: return null
@@ -147,8 +134,11 @@ class MinuteDramaProvider : MainAPI() {
                 val id = tv.get("id")?.asInt() ?: return@mapNotNull null
                 val title = tv.get("title")?.asText() ?: return@mapNotNull null
                 val cover = tv.get("coverUrl")?.asText()
-                val slug = titleToSlug(title)
-                newMovieSearchResponse(title, "$mainUrl/en/tv-desc/$slug/$id", TvType.TvSeries) {
+                val slug = tv.get("title")?.asText()?.lowercase()
+                    ?.replace(Regex("[^a-z0-9\\s-]"), "")
+                    ?.replace(Regex("\\s+"), "-")
+                    ?.replace(Regex("-+"), "-")?.trim('-') ?: ""
+                newMovieSearchResponse(title, "$mainUrl/$loc/tv-desc/$slug/$id", TvType.TvSeries) {
                     this.posterUrl = cover
                 }
             }
@@ -159,8 +149,8 @@ class MinuteDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val doc = app.get(
-                "$mainUrl/en/search?keyword=${query.trim().replace(" ", "+")}",
-                referer = mainUrl
+                "$mainUrl/$loc/search?keyword=${query.trim().replace(" ", "+")}",
+                referer = "$mainUrl/$loc/"
             ).document
             parseCards(doc)
         } catch (e: Exception) { null }
@@ -168,10 +158,10 @@ class MinuteDramaProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         return try {
-            val doc = app.get(url, referer = mainUrl).document
+            val doc = app.get(url, referer = "$mainUrl/$loc/").document
             val pageSource = doc.html()
 
-            // استخراج معرف المسلسل من URL
+            // استخراج معرف المسلسل من URL (آخر أرقام بعد آخر /)
             val tvId = url.substringAfterLast("/").substringBefore("?").toIntOrNull()
 
             // استخراج مصفوفة الحلقات
@@ -223,19 +213,19 @@ class MinuteDramaProvider : MainAPI() {
             val epNum = parts[2].trim().toIntOrNull() ?: return false
 
             // نجلب صفحة التفاصيل من جديد للحصول على روابط طازجة (التوكن ينتهي)
-            val doc = app.get("$mainUrl/en/tv-desc/x/$tvId", referer = mainUrl).document
+            val doc = app.get("$mainUrl/$loc/tv-desc/x/$tvId", referer = "$mainUrl/$loc/").document
             val jsonArr = extractEpisodeJson(doc.html()) ?: return false
 
             val ep = jsonArr.find { it.get("episodeNum")?.asInt() == epNum } ?: return false
 
             val videoUrl = ep.get("episodeVideoUrl")?.asText()
             val backupUrl = ep.get("bkEpisodeVideoUrl")?.asText()
-            val subtitleUrl = ep.get("textTrackUrl")?.asText()
+            val subtitleUrlAr = ep.get("textTrackUrl")?.asText() // رابط عربي من الصفحة
 
             // مصدر الرئيسي — MP4 مباشر
             videoUrl?.let {
                 callback(newExtractorLink(name, "الحلقة $epNum", it, ExtractorLinkType.VIDEO) {
-                    referer = mainUrl
+                    referer = "$mainUrl/$loc/"
                     quality = getQualityFromName("720p")
                 })
             }
@@ -243,13 +233,18 @@ class MinuteDramaProvider : MainAPI() {
             // مصدر احتياطي — CDN4
             backupUrl?.let {
                 callback(newExtractorLink(name, "الحلقة $epNum (احتياطي)", it, ExtractorLinkType.VIDEO) {
-                    referer = mainUrl
+                    referer = "$mainUrl/$loc/"
                     quality = getQualityFromName("720p")
                 })
             }
 
-            // ترجمة VTT
-            subtitleUrl?.let {
+            // ترجمة عربية — من رابط VTT العربي
+            subtitleUrlAr?.let {
+                subtitleCallback(newSubtitleFile("العربية", it))
+            }
+
+            // ترجمة إنجليزية — نستبدل ar بـ en في الرابط
+            subtitleUrlAr?.replace("/ar/", "/en/")?.replace("_ar.vtt", "_en.vtt")?.let {
                 subtitleCallback(newSubtitleFile("English", it))
             }
 

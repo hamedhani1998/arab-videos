@@ -641,14 +641,14 @@
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "fileSize": 19721,
     "status": 1,
-    "language": "en",
+    "language": "ar",
     "authors": [
       "hamedhani1998"
     ],
     "tvTypes": [
       "TvSeries"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "MinuteDrama",
     "description": "MinuteDrama - مسلسلات دراما قصيرة إنجليزية",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/MinuteDrama.cs3",
