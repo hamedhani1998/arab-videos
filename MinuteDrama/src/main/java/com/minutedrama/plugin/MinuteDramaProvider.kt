@@ -158,8 +158,10 @@ class MinuteDramaProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
+            // ترميز الاستعلام بشكل صحيح — مهم جدًا للأسماء العربية (بدونه يظهر البحث فارغًا)
+            val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
             val doc = app.get(
-                "$mainUrl/search?keyword=${query.trim().replace(" ", "+")}",
+                "$mainUrl/search?keyword=$encoded",
                 referer = "$mainUrl/"
             ).document
             parseCards(doc)
@@ -188,6 +190,14 @@ class MinuteDramaProvider : MainAPI() {
             val tvIdFromJson = jsonArr.firstOrNull()?.get("tvId")?.asInt() ?: tvId
             val poster = (tvIdFromJson ?: tvId)?.let { "$origin/cover/${it}_ar.jpg" }
 
+            // الحبكة/المقدمة — النص العربي من قسم "المقدمة" (data-full-text فيه النص الكامل)
+            val plot = doc.selectFirst("span.description-text")
+                ?.attr("data-full-text")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: doc.selectFirst(".description-text")?.text()?.trim()
+
+            // الوسوم (التصنيفات) — مثل الموقع: أخلاقيات، مغامرة، هوية مخفية...
+            val tags = doc.select("a.tv-tag").mapNotNull { it.text().trim().ifBlank { null } }
+
             // إنشاء الحلقات
             val episodes = jsonArr.mapNotNull { ep ->
                 val epNum = ep.get("episodeNum")?.asInt()
@@ -200,6 +210,8 @@ class MinuteDramaProvider : MainAPI() {
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
+                this.plot = plot
+                this.tags = tags
             }
         } catch (e: Exception) { null }
     }
