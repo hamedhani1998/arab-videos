@@ -142,19 +142,24 @@ class ReelreeProvider : MainAPI() {
             // قائمة الحلقات:
             //  1) حلقة خاصة "الحلقة كاملة" ← السيرفر الكامل (الملف المدمج بكل الجودات/الترجمات/الأصوات) — مرة واحدة
             //  2) حلقات منفصلة 1..N ← عبر data-media / %EP% (الحلقة المستقلة)
+            // ملاحظة: يجب أن يبدأ حقل data بعنوان http دائمًا — إذا بدأ بنص عادي (مثل "FULL|")
+            // يفسّره CloudStream كمسار نسبي فيهشّل الرابط. لذا نضع علامة كاملة أولًا ثم نلحقها
+            // بـ "|" وبعدها السيرفر الكامل: data = "https://reelree.com/full|{fullMaster}".
             val eps = mutableListOf<Episode>()
             val fullMaster = rrServer?.direct.orEmpty()
             if (fullMaster.startsWith("http")) {
-                eps.add(newEpisode("FULL|$fullMaster") {
+                eps.add(newEpisode("$mainUrl/full|$fullMaster") {
                     episode = 0
                     name = "الحلقة كاملة"
                 })
             }
             if (mediaTemplate.isNullOrBlank() || !mediaTemplate.startsWith("http")) {
-                eps.add(newEpisode("FULL|$fullMaster") {
-                    episode = 0
-                    name = "الحلقة"
-                })
+                if (eps.isEmpty() && fullMaster.startsWith("http")) {
+                    eps.add(newEpisode("$mainUrl/full|$fullMaster") {
+                        episode = 0
+                        name = "الحلقة"
+                    })
+                }
             } else {
                 for (n in 1..episodes) {
                     eps.add(newEpisode("$mediaTemplate|$n") {
@@ -227,8 +232,11 @@ class ReelreeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // ===== المسار 1: "الحلقة كاملة" — السيرفر الكامل فقط (ملف merged بجودات + ترجمات + أصوات) =====
-        if (data.startsWith("FULL|")) {
-            val fullMaster = data.removePrefix("FULL|").trim()
+        // البيانات تبدأ بعنوان http للعلامة (حتى لا يهشّل CloudStream حقل data)،
+        // والسيرفر الكامل يأتي بعد أول "|".
+        val firstPipe = data.indexOf('|')
+        if (firstPipe > 0 && data.substring(0, firstPipe) == "$mainUrl/full") {
+            val fullMaster = data.substring(firstPipe + 1).trim()
             if (!fullMaster.startsWith("http")) return false
 
             callback(newExtractorLink(name, "الحلقة كاملة", fullMaster, ExtractorLinkType.M3U8) {
