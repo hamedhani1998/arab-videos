@@ -443,20 +443,55 @@ class OnShortProvider : MainAPI() {
                     }
                 }
 
-                // ملاحظة مهمة: تجنّب الجلب البطيء لـ fetchMaster.
-                // إذا وُجد candidates[] (MP4 مباشر متعدد الجودات مثل dramabox/flextv) فهي
-                // جاهزة بلا أي اتصال شبكة — العرض منها فورًا أسرع للمستخدم بكثير من جلب رابط
-                // .mp4 كأنه HLS master (الذي ينتظر مهلة 10 ثوانٍ على السيرفر البطيء ثم يفشل).
+                // الاستراتيجية الذكية: بعض المنصات ترسل في الـ url رابطًا HLS master حقيقيًا
+                // يحوي كل الجودات وأصوات منفصلة (مثل DramaWave → 1080/720/540/480 + صوت).
+                // تسليم الماستر للمشغّل يعطيه كل الجودات تلقائيًا — أفضل من عرض جودة واحدة.
+                // منصات أخرى ترسل MP4 مباشرًا بعدة جودات (DramaBox/FlexTV → candidates) —
+                // الطريقة الصحيحة هناك عرض كل جودة كخيار منفصل (fast-path بلا شبكة).
+                //
+                // القرار: جرّب جلب الرابط الرئيسي nقياسه (مهلة قصيرة جدًا 2ث).
+                // - إن ظهر أنه HLS master (#EXT-X-STREAM-INF / #EXT-X-MEDIA) → نسلّم master
+                //   كخيار "Auto · كل الجودات"، وإلى جانبه كل جودة candidates باسمها.
+                // - إن لم يكن master (MP4 مباشر/مقطّع مباشر) → fast-path: نعرض candidates
+                //   كجودات فردية فورًا بلا انتظار، وإن لم يوجد candidates نعرض main وحده.
                 if (candidates.isNotEmpty()) {
-                    logD("OnShort.loadLinks using candidates directly (fast path), n=${candidates.size}")
-                    val seen = mutableSetOf<String>()
-                    for (v in candidates) {
-                        if (!seen.add(v.uri)) continue
-                        val label = if (v.height > 0) "${v.height}p" else "Auto"
-                        callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
-                            this.quality = getQualityFromName("$label")
+                    val masterText = try { getWithRetry(main, mainUrl, emptyMap(), 2) } catch (e: Exception) { null }
+                    val isMaster = masterText != null &&
+                        (masterText.contains("#EXT-X-STREAM-INF") || masterText.contains("#EXT-X-MEDIA"))
+                    logD("OnShort.loadLinks candidates=${candidates.size} master=$isMaster")
+
+                    if (isMaster) {
+                        // HLS master حقيقي: نسلمه كخيار تكيفي (كل الجودات + أصوات قابلة للتبديل)
+                        val qLabel = candidates.map { if (it.height > 0) "${it.height}p" else "Auto" }
+                            .distinct().ifEmpty { listOf("Auto") }.joinToString(" / ")
+                        callback(newExtractorLink(name, "Auto · $qLabel", main, ExtractorLinkType.M3U8) {
+                            this.quality = getQualityFromName("1080")
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
+                        // ونعرض أيضًا كل جودة candidates كخيار منفصل (بعض المشغّلين يفضّلها)
+                        var i = 0
+                        val seen = mutableSetOf<String>()
+                        for (v in candidates) {
+                            if (v.uri == main) continue
+                            if (!seen.add(v.uri)) continue
+                            val label = if (v.height > 0) "${v.height}p" else "Auto${if (++i > 1) " $i" else ""}"
+                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
+                                this.quality = getQualityFromName("$label")
+                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                            })
+                        }
+                    } else {
+                        // MP4 مباشر متعدد الجودات (dramabox/flextv): fast-path — نعرض كل جودة.
+                        logD("OnShort.loadLinks using candidates directly (fast path), n=${candidates.size}")
+                        val seen = mutableSetOf<String>()
+                        for (v in candidates) {
+                            if (!seen.add(v.uri)) continue
+                            val label = if (v.height > 0) "${v.height}p" else "Auto"
+                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
+                                this.quality = getQualityFromName("$label")
+                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                            })
+                        }
                     }
                 } else {
                     // جلب الماستر وتحليل كل الجودات والأصوات (للمصادر الحقيقية HLS).
