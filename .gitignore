@@ -2,7 +2,6 @@ build/
 .gradle/
 .kotlin/
 .tmp_capture/
-builds/
 *.log
 hs_err_pid*.log
 .idea/
