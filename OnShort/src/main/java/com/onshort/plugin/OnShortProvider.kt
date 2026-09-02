@@ -248,8 +248,9 @@ class OnShortProvider : MainAPI() {
             val meta = parseMeta(url)
             if (meta != null) {
                 // نبني الحلقات فورًا من البيانات المضمّنة، ونجلب التذكرة في الخلفية للتشغيل
+                // (عبر bootstrap API السريع — أسرع من صفحة ?p= البطيئة)
                 val cleanId = extractPostId(meta.id)
-                prefetchTicket(cleanId)
+                bootstrapTicketViaApi(cleanId)
                 return buildEpisodes(cleanId, meta.total, meta.title, meta.poster, stripMeta(url))
             }
 
@@ -298,36 +299,57 @@ class OnShortProvider : MainAPI() {
         return Regex("""<meta\s+property="og:image"\s+content="([^"]+)"""").find(res)?.groupValues?.get(1)
     }
 
-    // نجلب التذكرة في الخلفية (Thread + HttpURLConnection; kotlinx غير متاح) لنحفظها مؤقتًا.
-    // التذكرة خاصة بكل مسلسل وتأتي من الصفحة البطيئة ?p={postId} (~10s وتحت التقييد أبطأ).
-    // التشغيل يحدث داخل نافذة زمنية قصيرة في التطبيق، لذا نعيد المحاولة في الخلفية حتى نضمن
-    // وصولها قبل أن يضغط المستخدم على تشغيل (بدلًا من انتظارها في loadLinks وتجاوز المهلة → "لايوجد روابط").
-    private fun prefetchTicket(postId: String) {
+    // يجلب التذكرة عبر bootstrap API السريع (بدون الحاجة لصفحة ?p= البطيئة).
+    // يراسل مرةً بلا تذكرة فيرد الخادم "Player session expired" + تذكرة صالحة في الجسم.
+    // هذه الطريقة أسرع بكثير من صفحة ?p= (~1-3 ثانية بدل 10+ ثانية) وتُعطي رحلة API
+    // واحدة عند التشغيل الفعلي (بعد bootstrap) → تظهر الروابط بشكل أسرع.
+    private fun bootstrapTicketViaApi(postId: String) {
         if (cached?.postId == postId) return
-        // إن كان جلب لهذا المسلسل قيد التنفيذ فلا نبدأ جلبًا آخر
         val running = prefetchThread
         if (running != null && running.isAlive) return
-        val deadline = System.currentTimeMillis() + 30000
+        val deadline = System.currentTimeMillis() + 15000
         val th = Thread {
             var attempt = 0
             while (cached?.postId != postId && System.currentTimeMillis() < deadline) {
                 attempt++
                 try {
-                    val conn = java.net.URL(detailUrl(postId)).openConnection() as java.net.HttpURLConnection
+                    val ts = System.currentTimeMillis()
+                    val u = "$ONS_PLAY_API?post=$postId&episode=1&_t=$ts"
+                    val conn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
                     conn.requestMethod = "GET"
                     conn.setRequestProperty("User-Agent", ONS_UA)
                     conn.setRequestProperty("Referer", mainUrl)
-                    conn.connectTimeout = 15000
-                    conn.readTimeout = 18000
-                    val page = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                    val ticket = detailTicketRe.find(page)?.groupValues?.get(1)
-                    if (ticket != null) cached = PlayCache(postId, ticket)
-                    else break // الصفحة لم تتضمن تذكرة — لا جدوى من الإعادة
+                    conn.setRequestProperty("Accept", "application/json, text/plain, */*")
+                    conn.setRequestProperty("Accept-Encoding", "identity")
+                    conn.setRequestProperty("X-ONShort-Player", "1")
+                    conn.connectTimeout = 6000
+                    conn.readTimeout = 7000
+                    val code = conn.responseCode
+                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                    val bytes = stream?.readBytes() ?: ByteArray(0)
+                    stream?.close()
+                    conn.disconnect()
+                    val raw = if (bytes.size >= 2 && (bytes[0].toInt() and 0xff) == 0x1f && (bytes[1].toInt() and 0xff) == 0x8b) {
+                        try {
+                            java.util.zip.GZIPInputStream(java.io.ByteArrayInputStream(bytes))
+                                .bufferedReader(Charsets.UTF_8).use { it.readText() }
+                        } catch (_: Exception) { String(bytes, Charsets.UTF_8) }
+                    } else {
+                        String(bytes, Charsets.UTF_8)
+                    }
+                    val node = try { mapper.readTree(raw) } catch (_: Exception) { null }
+                    val newTicket = node?.get("ticket")?.asText()?.takeIf { it.isNotBlank() }
+                    if (newTicket != null) {
+                        cached = PlayCache(postId, newTicket)
+                    } else {
+                        // bootstrap لم يثمر تذكرة — توقف (لا نحرق الوقت على صفحة بطيئة)
+                        break
+                    }
                 } catch (_: Exception) {
-                    // 502/504/مهلة — أعد المحاولة بفاصل قصير
+                    // مهلة/فشل اتصال — أعد المحاولة بفاصل قصير
                 }
                 if (cached?.postId != postId && System.currentTimeMillis() < deadline) {
-                    try { Thread.sleep(1200L) } catch (_: InterruptedException) {}
+                    try { Thread.sleep(300L) } catch (_: InterruptedException) {}
                 }
             }
         }
@@ -690,7 +712,11 @@ class OnShortProvider : MainAPI() {
             //    (FreeReels مثلًا يرد 500 Internal Server Error — لا جدوى من تكرار 4 مرات.)
             val notHandled = msg.contains("REST bridge") || msg.contains("not handled")
             val refreshFail = msg.contains("refresh failed") && Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg)
-            val permanentReject = notHandled || refreshFail
+            // أخطاء خادم غير قابلة للاسترداد — لا نعيد المحاولة 4 مرات بطيئة (تأخير العرض):
+            //  - "already running": تحديث وسائط المزود قيد التنفيذ — لن ينجح إذا أعدنا المحاولة
+            //  - "Media refresh failed": مصدر المنصة معطّل — تكرارها يُبطئ فقط
+            val busyFail = msg.contains("already running") || msg.contains("Media refresh failed")
+            val permanentReject = notHandled || refreshFail || busyFail
             val hasFresh = newTicket != null
             val canRetry = (attempt < 3) && !permanentReject
             val fullUrl = node.get("url")?.asText().orEmpty()
