@@ -410,7 +410,23 @@ class OnShortProvider : MainAPI() {
             val cachedTicket = cached?.takeIf { it.postId == postId }?.ticket
             logD("OnShort.loadLinks post=$postId ep=$ep cachedTicket=${cachedTicket?.isNotBlank() == true}")
 
-            val node = fetchEpisode(postId, ep, cachedTicket) ?: run {
+            // تسريع أول تشغيل: إن كان الجلب الخلفي للـ prefetch (المُطلق أثناء load()) لا يزال
+            // في الخلفية وحُفظت التذكرة للتو، نستخدمها بدلًا من دفع bootstrap كامل داخل
+            // fetchEpisode (رحلتان: "Player session expired" ثم نجاح). انتظار قصير جدًا (حتى
+            // 1.2ث) يستفيد من الرحلة الجارية بدل تكرارها، وذا لم تكتمل نكمل bootstrap كالمعتاد.
+            run {
+                val running = prefetchThread
+                val deadline = System.currentTimeMillis() + 1200
+                while (running != null && running.isAlive && System.currentTimeMillis() < deadline) {
+                    cached?.let { if (it.postId == postId) return@run }
+                    try { Thread.sleep(120) } catch (_: InterruptedException) { break }
+                }
+            }
+            val cachedTicket2 = cached?.takeIf { it.postId == postId }?.ticket
+            logD("OnShort.loadLinks after prefetch-wait cached=${cachedTicket2?.isNotBlank() == true}")
+            val effectiveTicket = cachedTicket2 ?: cachedTicket
+
+            val node = fetchEpisode(postId, ep, effectiveTicket) ?: run {
                 logD("OnShort.loadLinks fetchEpisode null -> false")
                 return false
             }
@@ -428,119 +444,61 @@ class OnShortProvider : MainAPI() {
             // تشغيلُها يؤدي إلى صمتٍ تام (لا يوجد صوت). master فقط هو المضمون السليم صوتيًا.
             val main = node.get("url")?.asText()
             if (!main.isNullOrBlank()) {
-                val serverQ = node.get("quality")?.asText() ?: "1080"
-                // candidates[] يحمل كل جودة برابطها المستقل — مزوّدات مثل dramabox/flextv
-                // ترجع MP4 مباشرًا بعدة جودات هنا. نستبعد ما ليس kind=="media" (علامات/إعلانات إن وُجدت).
+                // candidates[] يحمل كل جودة برابطها المستقل. kind يكون "media" (MP4 مباشر)
+                // أو "hls" (playlist HLS) — كلا النوعين روابط فيديو صالحة يجب عرضها.
+                // (كان فلتر kind=="media" فقط يحذف جودات iDrama/ReelShort/Stardust ذات kind=hls
+                //  فيُظهر مزوّد "Auto" واحد بدل كل الجودات المتوفرة — أصلحته.)
                 val candidates = mutableListOf<HlsVariant>()
                 val candArr = node.get("candidates")
                 if (candArr != null && candArr.isArray) {
                     for (c in candArr) {
                         val cu = c.get("url")?.asText() ?: continue
                         if (cu.isBlank()) continue
-                        if ((c.get("kind")?.asText() ?: "media") != "media") continue
                         val h = Regex("""\d+""").find(c.get("quality")?.asText() ?: "")?.value?.toIntOrNull() ?: 0
                         candidates.add(HlsVariant(h, cu))
                     }
                 }
 
-                // الاستراتيجية الذكية: بعض المنصات ترسل في الـ url رابطًا HLS master حقيقيًا
-                // يحوي كل الجودات وأصوات منفصلة (مثل DramaWave → 1080/720/540/480 + صوت).
-                // تسليم الماستر للمشغّل يعطيه كل الجودات تلقائيًا — أفضل من عرض جودة واحدة.
-                // منصات أخرى ترسل MP4 مباشرًا بعدة جودات (DramaBox/FlexTV → candidates) —
-                // الطريقة الصحيحة هناك عرض كل جودة كخيار منفصل (fast-path بلا شبكة).
-                //
-                // القرار: جرّب جلب الرابط الرئيسي nقياسه (مهلة قصيرة جدًا 2ث).
-                // - إن ظهر أنه HLS master (#EXT-X-STREAM-INF / #EXT-X-MEDIA) → نسلّم master
-                //   كخيار "Auto · كل الجودات"، وإلى جانبه كل جودة candidates باسمها.
-                // - إن لم يكن master (MP4 مباشر/مقطّع مباشر) → fast-path: نعرض candidates
-                //   كجودات فردية فورًا بلا انتظار، وإن لم يوجد candidates نعرض main وحده.
+                // الاستراتيجية السريعة والآمنة (بلا أي سحب شبكة في مسار التشغيل):
+                // ExoPlayer/CloudStream يحلّل master HLS بنفسه تلقائيًا ويعطي كل الجودات
+                // والأصوات فورًا (يختار الجودة تلقائيًا). لذلك لا نحتاج جلب master مسبقًا
+                // (كان هذا الجلب هو سبب تأخير عرض الفيديو والجودات).
+                // القاعدة:
+                //   • main دائمًا يُسلّم كأساس "Auto" — الرابط المؤكّد التشغيل (كان يعمل قبل
+                //     إضافة candidates؛ إبقاؤه يمنع الشاشة السوداء).
+                //   • كل مرشح مختلف عن main يُعرض بجودته كخيار صريح (لا نكرر main ولا نرسل
+                //     مرشحات مكسورة قد تسبب شاشة سوداء — نكتفي بالروابط الصالحة المميزة).
                 if (candidates.isNotEmpty()) {
-                    val masterText = try { getWithRetry(main, mainUrl, emptyMap(), 2) } catch (e: Exception) { null }
-                    val isMaster = masterText != null &&
-                        (masterText.contains("#EXT-X-STREAM-INF") || masterText.contains("#EXT-X-MEDIA"))
-                    logD("OnShort.loadLinks candidates=${candidates.size} master=$isMaster")
+                    val mainIsHls = linkType(main) == ExtractorLinkType.M3U8
+                    val mainInCandidates = candidates.any { it.uri == main }
+                    logD("OnShort.loadLinks candidates=${candidates.size} mainHls=$mainIsHls inCands=$mainInCandidates")
 
-                    if (isMaster) {
-                        // HLS master حقيقي: نسلمه كخيار تكيفي (كل الجودات + أصوات قابلة للتبديل)
-                        val qLabel = candidates.map { if (it.height > 0) "${it.height}p" else "Auto" }
-                            .distinct().ifEmpty { listOf("Auto") }.joinToString(" / ")
-                        callback(newExtractorLink(name, "Auto · $qLabel", main, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName("1080")
+                    // أساس: main. إن كان m3u8 (master/تشغيل adaptif) سلّمه كـ "Auto"
+                    // (ExoPlayer يحلّل master: كل الجودات + صوت تلقائيًا). إن كان MP4 مباشر
+                    // سلّمه فقط لو لم يكن مكررًا في المرشحات (حينها نعرض المرشحات بدلًا منه).
+                    if (mainIsHls || !mainInCandidates) {
+                        callback(newExtractorLink(name, "Auto · OnShort", main, mainIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
                             this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
                         })
-                        // ونعرض أيضًا كل جودة candidates كخيار منفصل (بعض المشغّلين يفضّلها)
-                        var i = 0
-                        val seen = mutableSetOf<String>()
-                        for (v in candidates) {
-                            if (v.uri == main) continue
-                            if (!seen.add(v.uri)) continue
-                            val label = if (v.height > 0) "${v.height}p" else "Auto${if (++i > 1) " $i" else ""}"
-                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
-                                this.quality = getQualityFromName("$label")
-                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                            })
-                        }
-                    } else {
-                        // MP4 مباشر متعدد الجودات (dramabox/flextv): fast-path — نعرض كل جودة.
-                        logD("OnShort.loadLinks using candidates directly (fast path), n=${candidates.size}")
-                        val seen = mutableSetOf<String>()
-                        for (v in candidates) {
-                            if (!seen.add(v.uri)) continue
-                            val label = if (v.height > 0) "${v.height}p" else "Auto"
-                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
-                                this.quality = getQualityFromName("$label")
-                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                            })
-                        }
+                    }
+
+                    // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
+                    val seen = mutableSetOf<String>()
+                    for (v in candidates) {
+                        if (v.uri == main) continue
+                        if (!seen.add(v.uri)) continue
+                        val label = if (v.height > 0) "${v.height}p" else "Auto"
+                        callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
+                            this.quality = getQualityFromName(if (v.height > 0) "${v.height}p" else "1080")
+                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                        })
                     }
                 } else {
-                    // جلب الماستر وتحليل كل الجودات والأصوات (للمصادر الحقيقية HLS).
-                    // أي فشل في التحليل = لا نكسر التشغيل: نعود للمسلطة التكيفية نفسها.
-                    val masterText = try { fetchMaster(main) } catch (e: Exception) { null }
-                    val (variants, audios) = if (masterText != null) parseMaster(masterText, main)
-                        else (emptyList<HlsVariant>() to emptyList<HlsAudio>())
-                    logD("OnShort.loadLinks master variants=${variants.size} audios=${audios.size} candidates=0")
-
-                when {
-                    // HLS حقيقي بجودات متعددة + صوت مستقل: نسلم الماستر التكيفي (كل الجودات
-                    // + أصوات قابلة للتبديل) وإلى جانبه كل مسار صوتي كخيار مستقل.
-                    variants.isNotEmpty() && audios.isNotEmpty() -> {
-                        val qLabel = variants.map { "${it.height}p" }.joinToString(" / ")
-                        callback(newExtractorLink(name, "Auto · $qLabel", main, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName("1080")
-                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                        })
-                        val em = mutableSetOf<String>()
-                        for (a in audios) {
-                            if (a.group.isBlank() && a.name.isBlank()) continue
-                            if (!em.add(a.uri)) continue
-                            val label = (a.name.takeIf { it.isNotBlank() } ?: "صوت").take(60)
-                            callback(newExtractorLink(name, "صوت · $label", a.uri, ExtractorLinkType.M3U8) {
-                                this.quality = getQualityFromName("1")
-                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                            })
-                        }
-                    }
-                    // HLS مدمج الصوت (muxed): كل جودة نسخة كاملة صوتيًا — نعرضها منفردة.
-                    variants.isNotEmpty() -> {
-                        for (v in variants) {
-                            val label = if (v.height > 0) "${v.height}p" else "Auto"
-                            callback(newExtractorLink(name, "$label · OnShort", v.uri, linkType(v.uri)) {
-                                this.quality = getQualityFromName("$label")
-                                this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                            })
-                        }
-                    }
-                    // جودة واحدة فقط — نعرض main كما ذكرها الخادوم باسمها الصحيح
-                    // (نصل هنا فقط عند عدم وجود candidates — عولجت أعلاه بالمسار السريع).
-                    else -> {
-                        val label = Regex("""\d+""").find(serverQ)?.value?.let { "${it}p" } ?: "Auto"
-                        callback(newExtractorLink(name, "$label · OnShort", main, linkType(main)) {
-                            this.quality = getQualityFromName("$label")
-                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                        })
-                    }
-                }
+                    // لا يوجد candidates: main وحده. دلّ نوعه (m3u8 = HLS تكيفي كل الجودات،
+                    // mp4 = مباشر). بلا جلب — يفتح فورًا.
+                    callback(newExtractorLink(name, "Auto · OnShort", main, linkType(main)) {
+                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                    })
                 }
             }
 
@@ -698,10 +656,13 @@ class OnShortProvider : MainAPI() {
             // رفضُه النهائي يُعرَّف بمحتوى الرسالة (REST bridge / not handled) وليس بـ retryable:
             //  - "Player session expired" = أول خطوة bootstrap (تصدر تذكرة جديدة) — يجب متابعتها،
             //    مهما كان retryable=false، وإلا لن يشتغل أي مصدر (أثبتنا أن المحاولة الثانية تنجح).
-            //  - "REST bridge"/"not handled"/"Media refresh 401" = رفض نهائي حقيقي — أوقف المحاولة.
+            //  - "REST bridge"/"not handled" = المزود مرفوض من موقع وسيط OnShort نفسه.
+            //  - "Media refresh failed: HTTP 5xx (401/500/504…)" = مصدر المنصة ينكسر/لا يجيب —
+            //    رفض نهائي حقيقي، أوقف المحاولة فورًا بدل إعادة المحاولة البطيئة عدة مرات.
+            //    (FreeReels مثلًا يرد 500 Internal Server Error — لا جدوى من تكرار 4 مرات.)
             val notHandled = msg.contains("REST bridge") || msg.contains("not handled")
-            val hard401 = msg.contains("refresh failed") && msg.contains("401")
-            val permanentReject = notHandled || hard401
+            val refreshFail = msg.contains("refresh failed") && Regex("""HTTP\s+[45]\d\d""").containsMatchIn(msg)
+            val permanentReject = notHandled || refreshFail
             val hasFresh = newTicket != null
             val canRetry = (attempt < 3) && !permanentReject
             logD("OnShort.fetchEpisode attempt=$attempt ok=$ok newTicket=$hasFresh permReject=$permanentReject msg=${msg.take(50)} url=${node.get("url")?.asText().orEmpty().take(60)}")
@@ -726,7 +687,9 @@ class OnShortProvider : MainAPI() {
             msg.contains("REST bridge") || msg.contains("not handled") ->
                 "هذه المنصة مرفوضة من خادم OnShort نفسه. متاحة عبر مزودها المستقل من التطبيق (NetShort / ShortTV / ReelShort)."
             msg.contains("session expired") -> "انتهت جلسة التذكرة — حاول مرة أخرى"
-            msg.contains("refresh failed") -> "مصدر المنصة لا يستجيب حاليًا (401 على المصدر الأصلي)"
+            msg.contains("refresh failed") && Regex("""HTTP\s+5\d\d""").containsMatchIn(msg) ->
+                "مصدر هذه المنصة معطّل من جهة OnShort حاليًا (خطأ في السيرفر 5xx) — جرّب منصة أخرى أو لاحقًا."
+            msg.contains("refresh failed") -> "مصدر المنصة لا يستجيب حاليًا (خطأ على المصدر الأصلي)"
             else -> msg
         }
     }
