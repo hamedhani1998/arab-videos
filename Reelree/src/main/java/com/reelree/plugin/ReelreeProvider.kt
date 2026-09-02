@@ -219,33 +219,20 @@ class ReelreeProvider : MainAPI() {
         var found = false
 
         // ===== سيرفر 1: الحلقات — عبر data-media / %EP% =====
+        // ملاحظة: روابط /api/dx/{id}/{n}.m3u8 رغم امتدادها .m3u8 تُرجع في الواقع ملف MP4
+        // مباشر (Content-Type: video/mp4). لذلك نعاملها كـ VIDEO مباشر لا كـ HLS — فمشغّل
+        // HLS يفشل عليها (Source error). نُرسلها مباشرة للمشغّل دون جلب (فهي ملف كبير).
         try {
             val epUrl = template.replace("%EP%", ep)
             if (epUrl.endsWith(".m3u8")) {
-                // حاول جلب master الحلقة لاستخراج جوداتها
-                val masterText = runCatching { app.get(epUrl, referer = mainUrl, headers = mapOf("User-Agent" to UA)).text }.getOrNull()
-                if (!masterText.isNullOrBlank() && masterText.contains("#EXT-X-STREAM-INF")) {
-                    val variants = extractVariants(masterText, epUrl)
-                    if (variants.isNotEmpty()) {
-                        for ((u, q) in variants) {
-                            callback(newExtractorLink(name, "الحلقات $ep ($q p)", u, ExtractorLinkType.M3U8) {
-                                referer = mainUrl
-                                quality = q
-                            })
-                            found = true
-                        }
-                    }
-                }
-                // بلا جودات متعددة → ارجع الرابط نفسه
-                if (!found) {
-                    callback(newExtractorLink(name, "الحلقات $ep", epUrl, ExtractorLinkType.M3U8) {
-                        referer = mainUrl
-                        quality = getQualityFromName("720p")
-                    })
-                    found = true
-                }
+                // رغم الامتداد .m3u8 المحتوى mp4 مباشر → VIDEO
+                callback(newExtractorLink(name, "الحلقات $ep", epUrl, ExtractorLinkType.VIDEO) {
+                    referer = mainUrl
+                    quality = getQualityFromName("720p")
+                })
+                found = true
             } else {
-                // mp4 مباشر (أو أي رابط مباشر)
+                // mp4 / رابط مباشر آخر
                 callback(newExtractorLink(name, "الحلقات $ep", epUrl, ExtractorLinkType.VIDEO) {
                     referer = mainUrl
                     quality = getQualityFromName("720p")
@@ -255,44 +242,40 @@ class ReelreeProvider : MainAPI() {
         } catch (e: Exception) { }
 
         // ===== سيرفر 2: السيرفر الكامل — ملف merged بجودات متعددة + ترجمات + أصوات =====
+        // سلّم master مباشرة للمشغّل (ExoPlayer يفكّ كل الجودات تلقائيًا)، بدل جلبها
+        // هنا — لأن جلب master الكامل قد يتجاوز المهلة (سيرفر v2 بطيء) فيفشل العرض.
         if (fullMaster.startsWith("http")) {
-            try {
-                val masterText = runCatching { app.get(fullMaster, referer = mainUrl, headers = mapOf("User-Agent" to UA)).text }.getOrNull()
-                if (!masterText.isNullOrBlank() && masterText.startsWith("#EXT")) {
-                    val variants = extractVariants(masterText, fullMaster)
-                    if (variants.isNotEmpty()) {
-                        for ((u, q) in variants) {
-                            val label = when (q) { 1080 -> "1080p"; 720 -> "720p"; else -> "${q}p" }
-                            callback(newExtractorLink(name, "السيرفر الكامل $ep ($label)", u, ExtractorLinkType.M3U8) {
-                                referer = mainUrl
-                                quality = q
-                            })
-                            found = true
-                        }
-                    } else {
-                        // master بدون بثّات (قد يكون قائمة مباشرة) → ارجع master مباشرة
-                        callback(newExtractorLink(name, "السيرفر الكامل $ep", fullMaster, ExtractorLinkType.M3U8) {
-                            referer = mainUrl
-                            quality = getQualityFromName("1080p")
-                        })
-                        found = true
-                    }
+            callback(newExtractorLink(name, "السيرفر الكامل $ep", fullMaster, ExtractorLinkType.M3U8) {
+                referer = mainUrl
+                quality = getQualityFromName("1080p")
+            })
+            found = true
 
-                    // الترجمات والأصوات من master السيرفر الكامل
-                    for (t in extractTracks(masterText, fullMaster)) {
-                        try {
-                            if (t.kind == "SUBTITLES") {
-                                subtitleCallback(newSubtitleFile(t.lang, t.uri))
-                            } else if (t.kind == "AUDIO") {
-                                callback(newExtractorLink(name, "صوت: ${t.lang}", t.uri, ExtractorLinkType.M3U8) {
-                                    referer = mainUrl
-                                    quality = getQualityFromName("720p")
-                                })
-                            }
-                        } catch (_: Exception) {}
-                    }
+            // الترجمات والأصوات من master السيرفر الكامل — نجلب master بمرونة (مهلات/أعد)
+            // حتى لا نعتمد على رحلة واحدة قد تهلة (السيرفر بطيء). نستخرج tracks إن نجحنا،
+            // وإن فشلنا نبقى على master المسلّم أصلًا (المشغّل قد يحلّها هو أيضًا).
+            var masterText: String? = null
+            for (i in 0 until 3) {
+                masterText = runCatching {
+                    app.get(fullMaster, referer = mainUrl, headers = mapOf("User-Agent" to UA)).text
+                }.getOrNull()
+                if (!masterText.isNullOrBlank()) break
+                try { Thread.sleep(800L * (i + 1)) } catch (_: InterruptedException) {}
+            }
+            if (!masterText.isNullOrBlank() && masterText.startsWith("#EXT")) {
+                for (t in extractTracks(masterText, fullMaster)) {
+                    try {
+                        if (t.kind == "SUBTITLES") {
+                            subtitleCallback(newSubtitleFile(t.lang, t.uri))
+                        } else if (t.kind == "AUDIO") {
+                            callback(newExtractorLink(name, "صوت: ${t.lang}", t.uri, ExtractorLinkType.M3U8) {
+                                referer = mainUrl
+                                quality = getQualityFromName("720p")
+                            })
+                        }
+                    } catch (_: Exception) {}
                 }
-            } catch (e: Exception) { }
+            }
         }
 
         return found
