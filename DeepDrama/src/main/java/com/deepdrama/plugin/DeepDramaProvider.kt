@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -27,9 +29,12 @@ private class DdEntry(
 
 /**
  * DeepDrama — موقع Blogger عربي، كل مشاركة = مسلسل كامل في فيديو واحد مدمج
- * بخوادم متعددة (Rumble / voe.sx / vidaraa.cc). Rumble هو الوحيد القابل للتشغيل
- * المباشر (HLS بجميع الجودات)، لذا نجعل منه الخادم الأساسي ونستخدم loadExtractor
- * احتياطياً للبقية.
+ * بخوادم متعددة. خادمان قابلان للتشغيل المباشر:
+ *  1) vidaraa.cc (الأساسي/الأسرع): HLS تكيفي حتى 1080p + ترجمة عربية مضمونة.
+ *  2) Rumble (البديل): HLS تكيفي + mp4 + صوت AAC + ترجمة (إن وُجدت).
+ * نقدم لكل مسلسل خيارات الجودات مثل الموقع، والترجمات، والصوت عند توفرها.
+ * البيانات (روابط الخوادم) تُخزَّن في الحلقة أثناء عرض التفاصيل، وتُحلّ كل
+ * نتيجة مرة واحدة وتُخزَّن مؤقتًا ليكون التشغيل فوريًا.
  */
 class DeepDramaProvider : MainAPI() {
     override var name = "Deep Drama"
@@ -40,7 +45,6 @@ class DeepDramaProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     // أقسام الموقع من التذييل (الأقسام الأساسية + أنواع مختارة).
-    // كل قسم = في Blogger label (وسم). الأول "أحدث المسلسلات" يستخدم التغذية العامة.
     private val sections = listOf(
         "أحدث المسلسلات" to null,
         "مسلسلات" to "مسلسل",
@@ -61,59 +65,56 @@ class DeepDramaProvider : MainAPI() {
 
     private fun headers() = mapOf("User-Agent" to DD_UA)
 
-    // نتيجة فكّ روابط Rumble: master التكيفي + الجودات + mp4 المباشر + صوت + الترجمات.
-    private data class RumbleResolved(
-        val hls: String?,
-        val renditions: List<RumbleRendition>,
-        val mp4: String?,
-        val aac: String?,
+    // نتيجة فكّ روابط خادم: الـ master التكيفي + الجودات الفردية + الترجمات + الصوت.
+    private data class ServerResolved(
+        val name: String,               // اسم الخادم للعرض
+        val hls: String?,               // master التكيفي (جميع الجودات)
+        val renditions: List<ServerRendition>, // الجودات الفردية (اختياري)
         val subtitles: List<SubtitleTrack>,
+        // صوت منفصل (Rumble فقط) — معظم الخوادم تدمج الصوت داخل كل جودة
+        val audio: String?,
+        val directVideo: String?,       // mp4 مباشر (Rumble فقط)
     )
-    private data class RumbleRendition(val url: String, val height: Int, val bandwidth: Int)
-    // ملف ترجمة من صفحة Rumble: اسم اللغة بالعربية + رابط .vtt.
+    private data class ServerRendition(val url: String, val height: Int)
+    // ملف ترجمة: اسم اللغة + رابط .vtt
     private data class SubtitleTrack(val label: String, val url: String)
 
-    // تخزين مؤقت لنتائج فكّ روابط Rumble حسب رابط التضمين.
-    // جلب صفحة التضمين + الـ master بطيء؛ نجلبهما مرة واحدة لكل مسلسل (أثناء عرض التفاصيل)
-    // ثم نعيد استخدامهما فورًا عند التشغيل، فيظهر الـ master والجودات بلا انتظار.
-    private val rumbleResolveCache =
-        java.util.concurrent.ConcurrentHashMap<String, RumbleResolved>()
+    // تخزين مؤقت لنتائج فكّ كل خادم حسب مصدره (رابط التضمين أو filecode).
+    // الجلب يتم مرة واحدة أثناء عرض التفاصيل، فيُعاد استخدامه فورًا عند التشغيل.
+    private val resolveCache = java.util.concurrent.ConcurrentHashMap<String, ServerResolved>()
 
-    // يحلل الجودات من master playlist: كل سطر #EXT-X-STREAM-INF يعطينا دقة/رابط.
-    private fun parseRumbleRenditions(master: String): List<RumbleRendition> {
-        val out = mutableListOf<RumbleRendition>()
+    // ---------- Rumble ----------
+
+    /** يحلل الجودات من master playlist (Rumble: روابط مطلقة http). */
+    private fun parseRumbleMaster(master: String): List<ServerRendition> {
+        val out = mutableListOf<ServerRendition>()
         val lines = master.lines()
         for (i in 0 until lines.size - 1) {
             val inf = lines[i].trim()
             if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
-            val url = lines[i + 1].trim()
-            if (!url.startsWith("http")) continue
+            // Rumble يستخدم chunklists (r_file=...) غير موثوقة وقت التشغيل؛ نتجاهلها.
+            // نأخذ فقط الـ masters التكيفية الكاملة إن وُجدت — لكن Rumble لا يوفرها،
+            // لذا نعود لقراءة الـ master نفسه فقط (لا نخرج جودات تشغيل منفصلة).
             val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull()
-                ?: Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            val bandwidth = Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            out.add(RumbleRendition(url, height, bandwidth))
+            if (height != null) {
+                val url = lines[i + 1].trim()
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    out.add(ServerRendition(url, height))
+                }
+            }
         }
         return out.distinctBy { it.url }
     }
 
     /** يجلب روابط Rumble (مخزّنة) — مرة واحدة ثم يُعاد استخدامها. */
-    private suspend fun resolveRumble(embedUrl: String): RumbleResolved {
-        rumbleResolveCache[embedUrl]?.let { return it }
+    private suspend fun resolveRumble(embedUrl: String): ServerResolved {
+        resolveCache["rumble:$embedUrl"]?.let { return it }
         val html = app.get(embedUrl, headers = headers()).text
         val cleaned = html.replace("\\/", "/")
         val hls = Regex("""https://rumble\.com/[^"'\s<>]*?/playlist\.m3u8""").find(cleaned)?.value
         val mp4 = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.mp4""").find(cleaned)?.value
         val aac = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.aac""").find(cleaned)?.value
-        // لجلب الجودات الفردية نقرأ master (على rumble.com — سريع نسبيًا)
-        var renditions = emptyList<RumbleRendition>()
-        if (hls != null) {
-            try {
-                val masterText = app.get(hls, headers = headers(), referer = "$DD_MAIN/").text
-                renditions = parseRumbleRenditions(masterText)
-            } catch (_: Exception) { renditions = emptyList() }
-        }
-        // الترجمات: Rumble يعرضها في كائن "cc":{lang:{language,path(.vtt)}}. بعض الفيديوهات
-        // توفر ترجمة عربية (وأحياناً لغات أخرى)، وبعضها لا يوفر أي ترجمة.
+        // الترجمات: Rumble يعرضها في كائن "cc":{lang:{language,path(.vtt)}}.
         val subs = mutableListOf<SubtitleTrack>()
         try {
             val ccIdx = cleaned.indexOf("\"cc\"")
@@ -132,8 +133,98 @@ class DeepDramaProvider : MainAPI() {
             }
         } catch (_: Exception) { /* لا توجد ترجمة لهذا الفيديو */ }
 
-        val resolved = RumbleResolved(hls, renditions, mp4, aac, subs)
-        rumbleResolveCache[embedUrl] = resolved
+        // Rumble: لا نجعل الجودات الفردية خيارات تشغيل (chunklists غير موثوقة)
+        // — نقدم الـ master التكيفي فقط كخيار فيديو آمن، مع mp4 والصوت.
+        val resolved = ServerResolved(
+            name = "Rumble",
+            hls = hls,
+            renditions = emptyList(),  // الجودات الفردية غير موثوقة عند Rumble
+            subtitles = subs,
+            audio = aac,
+            directVideo = mp4,
+        )
+        resolveCache["rumble:$embedUrl"] = resolved
+        return resolved
+    }
+
+    // ---------- vidaraa ----------
+
+    /** يحول رابط vidaraa إلى filecode (المقطع بعد /e/). */
+    private fun vidaraaFilecode(embedUrl: String): String? {
+        return Regex("""/(?:e|v|embed)/([A-Za-z0-9_-]+)""").find(embedUrl)?.groupValues?.get(1)
+    }
+
+    /** يحلل الجودات من master vidaraa (روابط نسبية تُحلّ مقابل مجلد master). */
+    private fun parseVidaraaMaster(masterText: String, masterBase: String): List<ServerRendition> {
+        val out = mutableListOf<ServerRendition>()
+        val lines = masterText.lines()
+        for (i in 0 until lines.size - 1) {
+            val inf = lines[i].trim()
+            if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
+            val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            var url = lines[i + 1].trim()
+            if (url.isBlank() || url.startsWith("#")) continue
+            // الروابط نسبية (index_1080x1920.m3u8?token=...) — نحلها مقابل مجلد master
+            if (!url.startsWith("http")) url = masterBase + url
+            out.add(ServerRendition(url, height))
+        }
+        return out.distinctBy { it.height }
+    }
+
+    /**
+     * يجلب بيانات vidaraa من API (مخزّنة) — مرة واحدة.
+     * POST /api/stream => streaming_url (HLS 1080p) + subtitles (عربية مضمونة).
+     */
+    private suspend fun resolveVidaraa(embedUrl: String): ServerResolved {
+        resolveCache["vidaraa:$embedUrl"]?.let { return it }
+        val filecode = vidaraaFilecode(embedUrl) ?: return ServerResolved("vidaraa", null, emptyList(), emptyList(), null, null)
+        var streamUrl: String? = null
+        var subs = emptyList<SubtitleTrack>()
+        try {
+            val body = mapper.writeValueAsString(mapOf("filecode" to filecode, "device" to "web"))
+            val resp = app.post(
+                "https://vidaraa.cc/api/stream",
+                requestBody = body.toRequestBody("application/json; charset=utf-8".toMediaType()),
+                headers = headers() + mapOf(
+                    "Content-Type" to "application/json",
+                    "Referer" to embedUrl,
+                    "Origin" to "https://vidaraa.cc",
+                ),
+                referer = embedUrl,
+            ).text
+            val node = mapper.readTree(resp)
+            streamUrl = node.get("streaming_url")?.asText()?.takeIf { it.isNotBlank() }
+            // الترجمات: قائمة عناصر {file_path, language}
+            val subArr = node.get("subtitles")
+            if (subArr != null && subArr.isArray) {
+                subs = subArr.mapNotNull { s ->
+                    val path = s.get("file_path")?.asText()?.takeIf { it.isNotBlank() }
+                        ?: return@mapNotNull null
+                    val lang = s.get("language")?.asText().orEmpty().ifBlank { "العربية" }
+                    SubtitleTrack(lang, path)
+                }
+            }
+        } catch (_: Exception) { streamUrl = null }
+
+        // جودات vidaraa من الـ master (روابط index_XXX.m3u8 — playlists صحيحة، آمنة للتشغيل)
+        var renditions = emptyList<ServerRendition>()
+        if (streamUrl != null) {
+            try {
+                val base = streamUrl.substringBeforeLast('/') + "/"
+                val masterText = app.get(streamUrl, headers = headers(), referer = "https://vidaraa.cc/").text
+                renditions = parseVidaraaMaster(masterText, base)
+            } catch (_: Exception) { renditions = emptyList() }
+        }
+
+        val resolved = ServerResolved(
+            name = "vidaraa",
+            hls = streamUrl,
+            renditions = renditions,
+            subtitles = subs,
+            audio = null,
+            directVideo = null,
+        )
+        resolveCache["vidaraa:$embedUrl"] = resolved
         return resolved
     }
 
@@ -147,10 +238,9 @@ class DeepDramaProvider : MainAPI() {
         return clean
     }
 
-    // تحليل الصفحة الرئيسية (القائمة الافتراضية) - غير مستخدم فعلياً، نستخدم الـ feed
+    // تحليل تغذية Blogger (الصفحة الرئيسية)
     private fun parseFeedEntries(text: String): List<DdEntry> {
         val out = mutableListOf<DdEntry>()
-        // الاستجابة JSON من Blogger: feed.entry[]
         if (!text.trim().startsWith("{")) return out
         val root = mapper.readTree(text).get("feed") ?: return out
         val entries = root.get("entry") ?: return out
@@ -163,7 +253,6 @@ class DeepDramaProvider : MainAPI() {
                     if (l.get("rel")?.asText() == "alternate") { url = l.get("href")?.asText(); break }
                 }
             }
-            // الصورة: أول رابط صورة داخل content
             var poster: String? = null
             val content = e.get("content")?.get("\$t")?.asText()
             if (!content.isNullOrBlank()) {
@@ -177,8 +266,6 @@ class DeepDramaProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
-            // كل قسم في الواجهة يجلب من تغذية Blogger بالترحيل عبر start-index.
-            // الأقسام ذات الوسم (label) تستخدم /feeds/posts/default/-/{label}
             val label = sections.firstOrNull { it.first == request.data }?.second
             val start = ((page - 1) * 12) + 1
             val base = if (label == null)
@@ -201,21 +288,14 @@ class DeepDramaProvider : MainAPI() {
         } catch (e: Exception) { null }
     }
 
-    // بطاقات الموقع في صفحة البحث/الرئيسية (بنية .xr-card)
-    // <article class='xr-card'><a href='URL' title='TITLE'>...<img ... src='POSTER'>
+    // بطاقات الموقع (بنية .xr-card)
     private val xrCardRe = Regex(
         """<article class='xr-card'>.*?<a href='([^']+)' title='([^']*)'.*?<img[^>]*src='([^']+)'""",
         RegexOption.DOT_MATCHES_ALL
     )
-    // Google تفيد الصورة بالحجم داخل نفس الرابط (=w240) — نكبّرها قليلاً للنوعية
     private val posterSizeRe = Regex("""=w\d+""")
+    private fun upgradePoster(u: String): String = posterSizeRe.replace(u, "=w720")
 
-    // رفع دقة الصورة داخل رابط Blogger (=w240 -> =w720)
-    private fun upgradePoster(u: String): String {
-        return posterSizeRe.replace(u, "=w720")
-    }
-
-    // تحليل بطاقات .xr-card من صفحة (search / home)
     private fun parseCards(html: String): List<DdEntry> {
         val out = mutableListOf<DdEntry>()
         for (m in xrCardRe.findAll(html)) {
@@ -231,7 +311,6 @@ class DeepDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            // صفحة البحث الخاصة بالموقع أصدق من تغذية Blogger (q= فيها غير دقيق)
             val base = "$DD_MAIN/search?q=$q&max-results=20"
             val text = app.get(base, headers = headers()).text
             val items = parseCards(text)
@@ -253,7 +332,6 @@ class DeepDramaProvider : MainAPI() {
         val out = mutableListOf<String>()
         for (m in serverBtnRe.findAll(html)) {
             val url = m.groupValues[1].trim()
-            // نتجاهل القيم غير الصالحة (مثل نصوص JS ' + imgFallback + ')
             if (url.startsWith("http") && url.isNotBlank()) out.add(url)
         }
         return out
@@ -264,33 +342,36 @@ class DeepDramaProvider : MainAPI() {
             val doc = app.get(url, headers = headers()).document
             val raw = doc.html()
 
-            // العنوان: og:title ثم <title> (jsoup يفك تشفير الكيانات HTML تلقائياً)
             val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?.let { cleanTitle(it) }
                 ?: cleanTitle(doc.title()).orEmpty()
                 .ifBlank { "Deep Drama" }
-            // الصورة: og:image إن وُجد، وإلا أول صورة حقيقية داخل الصفحة
-            // (الموقع لا يضيف og:image — الغلاف الحقيقي هو صورة goodshort / blogger)
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
                 ?: extractPoster(raw)
             val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
 
-            // الخوادم داخل صفحة المسلسل
             val servers = serverButtons(raw)
             if (servers.isEmpty()) return null
 
-            // كل مسلسل = حلقة واحدة (الفيديو الكامل المدمج)
-            // نفضّل Rumble لأنه قابل للتشغيل المباشر
-            val rumble = servers.firstOrNull { it.contains("rumble.com") }
-            val primary = rumble ?: servers.first()
+            // نصنّف الخوادم: vidaraa (الأساسي/الأسرع) ثم Rumble (البديل).
+            val vidaraa = servers.firstOrNull { it.contains("vidaraa") }
+            val rumble = servers.firstOrNull { it.contains("rumble") }
+            val primary = vidaraa ?: rumble ?: servers.first()
 
-            // غيّث تخزين روابط Rumble الآن (أثناء عرض صفحة التفاصيل) حتى يكون
-            // التشغيل فوريًا عند الضغط على الحلقة — لا انتظار لجلب صفحة التضمين وقت التشغيل.
-            if (rumble != null) {
-                try { resolveRumble(rumble.substringBefore("?")) } catch (_: Exception) {}
-            }
+            // بيانات الحلقة: كل روابط الخوادم مفصولة بـ '|||' (لا يظهر في عناوين).
+            // نضع vidaraa أولاً ليكون الخيار الافتراضي (الأسرع استجابة والأعلى جودة).
+            val bundle = buildList {
+                if (vidaraa != null) add(vidaraa.substringBefore("?"))
+                if (rumble != null) add(rumble.substringBefore("?"))
+                if (size == 0) add(primary.substringBefore("?"))
+            }.joinToString("|||")
 
-            val episode = newEpisode(primary) {
+            // نعيد تدفئة ذاكرة التخزين لكلا الخادمين الآن (أثناء عرض التفاصيل)
+            // حتى لا ينتظر التشغيل إطلاقًا.
+            vidaraa?.let { try { resolveVidaraa(it.substringBefore("?")) } catch (_: Exception) {} }
+            rumble?.let { try { resolveRumble(it.substringBefore("?")) } catch (_: Exception) {} }
+
+            val episode = newEpisode(bundle) {
                 name = "الحلقة الكاملة"
                 episode = 1
             }
@@ -305,11 +386,61 @@ class DeepDramaProvider : MainAPI() {
     // استخراج صورة الغلاف من HTML المشاركة (بعد تفكيك الكيانات)
     private fun extractPoster(raw: String): String? {
         val html = raw.replace("&amp;", "&")
-        // غلاف المنصة المباشر أولاً (goodshort)، ثم صور Blogger
         return Regex("""https://(?:acf\.)?goodshort\.com/[^"'\s<>\\]+?\.(?:jpg|jpeg|png|webp)[^"'\s<>\\]*""")
             .find(html)?.value
             ?: Regex("""https://blogger\.googleusercontent\.com/[^"'\s<>\\]+?\.(?:jpg|jpeg|png|webp)[^"'\s<>\\]*""")
                 .find(html)?.value
+    }
+
+    /**
+     * يبثّ خيارات خادم واحد: master تكيفي + جودات فردية + ترجمات + صوت.
+     */
+    private suspend fun emitServer(
+        server: ServerResolved,
+        primary: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        val tag = server.name
+        val master = server.hls ?: server.renditions.maxByOrNull { it.height }?.url
+
+        // 1) الـ master التكيفي — الخيار المضمون الذي يشمل كل الجودات.
+        if (master != null) {
+            val max = server.renditions.maxOfOrNull { it.height } ?: 1080
+            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · جميع الجودات", master, ExtractorLinkType.M3U8) {
+                this.quality = getQualityFromName("${max}p")
+                this.headers = headers()
+            })
+        }
+
+        // 2) الجودات الفردية (مثل الموقع). vidaraa يوفر playlists صحيحة (آمنة).
+        server.renditions.sortedBy { it.height }.forEach { r ->
+            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag ${r.height}p", r.url, ExtractorLinkType.M3U8) {
+                this.quality = getQualityFromName("${r.height}p")
+                this.headers = headers()
+            })
+        }
+
+        // 3) فيديو مباشر (mp4) إن وُجد (Rumble).
+        server.directVideo?.let { mp4 ->
+            callback(newExtractorLink(name, "$tag MP4", mp4, ExtractorLinkType.VIDEO) {
+                this.quality = getQualityFromName("720p")
+                this.headers = headers()
+            })
+        }
+
+        // 4) صوت منفصل إن وُجد (Rumble يوفر AAC مستقلاً).
+        server.audio?.let { aac ->
+            callback(newExtractorLink(name, "$tag · صوت AAC", aac, ExtractorLinkType.VIDEO) {
+                this.quality = getQualityFromName("720p")
+                this.headers = headers()
+            })
+        }
+
+        // 5) ملفات الترجمة (كل لغة يوفّرها الخادم).
+        server.subtitles.forEach { sub ->
+            try { subtitleCallback(newSubtitleFile(sub.label, sub.url)) } catch (_: Exception) {}
+        }
     }
 
     override suspend fun loadLinks(
@@ -319,66 +450,44 @@ class DeepDramaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            var url0 = data
-            if (url0.isBlank()) return false
+            if (data.isBlank()) return false
 
-            // Rumble: نقدم جودات التشغيل الفعلية مثل الموقع + نسخة تكيفية تشمل كل الجودات.
-            // النتيجة مخزّنة (تُجلَب مرة واحدة أثناء عرض التفاصيل) فلا ينتظر التشغيل.
-            if (url0.contains("rumble.com")) {
-                val embedUrl = url0.substringBefore("?")
-                val resolved = resolveRumble(embedUrl)
+            // بيانات الحلقة: روابط الخوادم مفصولة بـ ||| (vidaraa أولاً = الافتراضي)
+            val serverUrls = data.split("|||").map { it.trim() }.filter { it.startsWith("http") && it.isNotBlank() }
 
-                val hlsUrl = resolved.hls
-                if (resolved.renditions.isNotEmpty() && hlsUrl != null) {
-                    // كل جودة كخيار منفصل (مثل الموقع): 480p, 360p...
-                    resolved.renditions.sortedBy { it.height }.forEach { r ->
-                        callback(newExtractorLink(name, "Rumble ${r.height}p", r.url, ExtractorLinkType.M3U8) {
-                            this.quality = getQualityFromName("${r.height}p")
-                            this.headers = headers()
-                        })
+            // نجهّز قائمة الخوادم بحسب أولويتها، ونتجنب أي تكرار في العناوين.
+            val resolved = mutableListOf<ServerResolved>()
+            var vidaraaEmitted = false
+            var rumbleEmitted = false
+
+            serverUrls.forEach { s ->
+                val resolvedServer = when {
+                    s.contains("vidaraa") && !vidaraaEmitted -> {
+                        vidaraaEmitted = true
+                        resolveVidaraa(s)
                     }
-                    // النسخة التكيفية: تشمل كل الجودات وتتبدل تلقائيًا مع سرعة النت
-                    callback(newExtractorLink(name, "Rumble · جميع الجودات", hlsUrl, ExtractorLinkType.M3U8) {
-                        this.quality = getQualityFromName("${resolved.renditions.maxOf { it.height }}p")
-                        this.headers = headers()
-                    })
-                } else if (hlsUrl != null) {
-                    // لم تُقرأ الجودات — نقدم master التكيفي كاملًا
-                    callback(newExtractorLink(name, "Rumble · جميع الجودات", hlsUrl, ExtractorLinkType.M3U8) {
-                        this.quality = getQualityFromName("720p")
-                        this.headers = headers()
-                    })
+                    s.contains("rumble") && !rumbleEmitted -> {
+                        rumbleEmitted = true
+                        resolveRumble(s)
+                    }
+                    else -> null
                 }
-
-                // مقطع mp4 مباشر — بديل فيديو آمن
-                if (resolved.mp4 != null) {
-                    callback(newExtractorLink(name, "Rumble MP4", resolved.mp4, ExtractorLinkType.VIDEO) {
-                        this.quality = getQualityFromName("720p")
-                        this.headers = headers()
-                    })
+                if (resolvedServer != null && (resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
+                            resolvedServer.directVideo != null)) {
+                    resolved.add(resolvedServer)
                 }
-
-                // صيغة الصوت (AAC) — الموقع يوفّر مسار صوت واحد مستقل فقط.
-                if (resolved.aac != null && resolved.hls != null) {
-                    callback(newExtractorLink(name, "صوت AAC", resolved.aac, ExtractorLinkType.VIDEO) {
-                        this.quality = getQualityFromName("720p")
-                        this.headers = headers()
-                    })
-                }
-
-                // ملفات الترجمة (WebVTT) — متوفرة لدى بعض فيديوهات Rumble (عربية غالبًا).
-                // نعرض كل لغة يوفّرها الفيديو.
-                resolved.subtitles.forEach { sub ->
-                    try {
-                        subtitleCallback(newSubtitleFile(sub.label, sub.url))
-                    } catch (_: Exception) {}
-                }
-
-                return true
             }
 
-            // مضيفات أخرى (voe/vidaraa...) - نجرب مستخرج CloudStream إن وُجد
-            loadExtractor(url0, mainUrl, subtitleCallback, callback)
+            if (resolved.isEmpty()) {
+                // لم يُحل أي خادم — نجرب مستخرج CloudStream العام كاحتياط أخير.
+                serverUrls.forEach { loadExtractor(it, mainUrl, subtitleCallback, callback) }
+            } else {
+                // الافتراضي (الأسرع/الأعلى جودة) = vidaraa، ثم Rumble وغيره.
+                resolved.forEachIndexed { idx, srv ->
+                    emitServer(srv, idx == 0, subtitleCallback, callback)
+                }
+            }
+            true
         } catch (e: Exception) { false }
     }
 }
