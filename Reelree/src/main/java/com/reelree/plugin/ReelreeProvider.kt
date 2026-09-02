@@ -31,15 +31,9 @@ class ReelreeProvider : MainAPI() {
                 val poster = card.selectFirst("img.rr-poster")?.let {
                     it.attr("src").ifBlank { it.attr("data-src") }
                 }?.ifBlank { null }
-                // "70 حلقة" أو "85 EP" — نحول إلى نص في الوصف
-                val eps = card.selectFirst(".rr-card-eps")?.text()?.trim()
-                val sub = card.selectFirst(".rr-card-sub")?.text()?.trim()
-                val src = card.selectFirst(".rr-src")?.text()?.trim()
-                val plot = listOfNotNull(src, sub, eps).joinToString(" · ").ifBlank { null }
 
                 newMovieSearchResponse(title, href, typ) {
                     this.posterUrl = poster
-                    if (!plot.isNullOrBlank()) this.plot = plot
                 }
             } catch (e: Exception) { null }
         }
