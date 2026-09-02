@@ -124,9 +124,10 @@ class MinuteDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val catId = request.data
-            val json = app.get(
+            val json = app.post(
                 "$mainUrl/$apiLoc/categoryTvs/$catId/pageNum/$page",
-                referer = "$mainUrl/$loc/"
+                referer = "$mainUrl/$loc/",
+                headers = mapOf("Content-Type" to "application/json")
             ).text
             val tree = mapper.readTree(json)
             val tvs = tree.get("dataResult")?.get("tvs") ?: return null
