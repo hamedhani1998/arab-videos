@@ -486,14 +486,12 @@ class OnShortProvider : MainAPI() {
                     val effInCands = candidates.any { it.uri == mainPlay }
                     logD("OnShort.loadLinks candidates=${candidates.size} mainHls=$effIsHls inCands=$effInCands mainWasHls=$mainIsHls")
 
-                    // أساس: main (المُحسَّن). إن كان m3u8 (master/تشغيل adaptif) سلّمه كـ "Auto"
-                    // (ExoPlayer يحلّل master: كل الجودات + صوت تلقائيًا). إن كان MP4 مباشر
-                    // سلّمه فقط لو لم يكن مكررًا في المرشحات (حينها نعرض المرشحات بدلًا منه).
-                    if (effIsHls || !effInCands) {
-                        callback(newExtractorLink(name, "Auto · OnShort", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
-                            this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
-                        })
-                    }
+                    // أساس: main (المُحسَّن) — نرسله دائمًا للمشغّل (HLS أو MP4).
+                    // كان الشرط القديم (effIsHls || !effInCands) يمنع MP4 موجودة في candidates
+                    // من الوصول للمشغّل → فيديو FlexTV/DramaBox لا يشتغل.
+                    callback(newExtractorLink(name, "Auto · OnShort", mainPlay, effIsHls.let { if (it) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO }) {
+                        this.headers = mapOf("User-Agent" to ONS_UA, "Referer" to mainUrl)
+                    })
 
                     // مرشحات الجودة الصريحة (مختلفة عن main، بلا تكرار مسار).
                     val seen = mutableSetOf<String>()
