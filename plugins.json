@@ -589,7 +589,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 1,
+    "version": 2,
     "internalName": "OnShort",
     "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/OnShort.cs3",
