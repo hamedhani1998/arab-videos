@@ -125,8 +125,12 @@ class MinuteDramaProvider : MainAPI() {
         return results
     }
 
-    /** يجلب الصفحة الرئيسية العربية مرة واحدة ويبني خريطة (اسم القسم ← بطاقاته بالعربي). */
+    /** يجلب الصفحة الرئيسية العربية مرة واحدة ويبني خريطة (اسم القسم ← بطاقاته بالعربي).
+     *  تُخزَّن النتيجة مؤقتًا لإظهار كل أقسام الموقع بسرعة وثبات. */
+    private var homeSectionsCache: Map<String, List<SearchResponse>>? = null
+
     private suspend fun buildHomeSections(): Map<String, List<SearchResponse>> {
+        homeSectionsCache?.let { return it }
         val doc = app.get("$mainUrl/", referer = "$mainUrl/").document
         val map = mutableMapOf<String, MutableList<SearchResponse>>()
         doc.select("a.md-section-link").forEach { link ->
@@ -143,6 +147,7 @@ class MinuteDramaProvider : MainAPI() {
             val cards = parseRowCards(row ?: return@forEach)
             if (cards.isNotEmpty()) map.getOrPut(title) { mutableListOf() }.addAll(cards)
         }
+        homeSectionsCache = map
         return map
     }
 
@@ -283,14 +288,36 @@ class MinuteDramaProvider : MainAPI() {
                 })
             }
 
-            // ترجمة عربية — من رابط VTT العربي
-            try { subtitleUrlAr?.let { subtitleCallback(newSubtitleFile("العربية", it)) } } catch (_: Exception) {}
-
-            // ترجمة إنجليزية — نستبدل ar بـ en في الرابط (إن تغيّر الرابط فعلًا)
-            val subtitleUrlEn = subtitleUrlAr?.replace("/ar/", "/en/")?.replace("_ar.vtt", "_en.vtt")
-            if (subtitleUrlEn != null && subtitleUrlEn != subtitleUrlAr) {
-                try { subtitleCallback(newSubtitleFile("English", subtitleUrlEn)) } catch (_: Exception) {}
+            // الترجمات — نعرض كل اللغات المتوفرة في الموقع.
+            // رابط VTT الأساسي عربي بالصيغة: .../vtt/ar/version-2/{id}_{ep}_ar.vtt
+            // والموقع يوفر 8 لغات (تحقّقنا منها كلها ترجع 200): ar/en/fr/de/es/pt/id/zh
+            // نشتق بقية اللغات بتبديل رمز اللغة في المسار واسم الملف معًا.
+            if (subtitleUrlAr != null) {
+                val languages = listOf(
+                    "ar" to "العربية",
+                    "en" to "الإنجليزية",
+                    "fr" to "الفرنسية",
+                    "de" to "الألمانية",
+                    "es" to "الإسبانية",
+                    "pt" to "البرتغالية",
+                    "id" to "الإندونيسية",
+                    "zh" to "الصينية",
+                )
+                languages.forEach { (code, label) ->
+                    try {
+                        val url = if (code == "ar") subtitleUrlAr
+                        else subtitleUrlAr
+                            .replace("/vtt/ar/", "/vtt/$code/")
+                            .replace("_ar.vtt", "_$code.vtt")
+                        if (url != null && url != subtitleUrlAr || code == "ar") {
+                            subtitleCallback(newSubtitleFile(label, url))
+                        }
+                    } catch (_: Exception) {}
+                }
             }
+
+            // الصوت — الموقع يضمّ مسارًا صوتيًا واحدًا مدمجًا داخل ملف MP4 نفسه
+            // (لا توجد ملفات صوت منفصلة/languages إضافية في بيانات الحلقة).
 
             true
         } catch (e: Exception) { false }
