@@ -179,14 +179,14 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val q = request.data.replace(" ", "+")
-            val (base, body) = tryMirrors { b ->
-                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
-            } ?: return null
-            val items = parseSearchItems(body)
+            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            android.util.Log.e("NartoDrama", "getMainPage q=$q len=${html.length} item=" + html.contains("\"@type\":\"ListItem\""))
+            val items = parseSearchItems(html)
             if (items.isEmpty()) return null
-            val list = items.mapNotNull { it.toSearchResponse(base) }
+            val list = items.mapNotNull { it.toSearchResponse() }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "getMainPage ERROR", e)
             null
         }
     }
@@ -194,23 +194,21 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val (base, body) = tryMirrors { b ->
-                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
-            } ?: return null
-            val items = parseSearchItems(body)
-            items.mapNotNull { it.toSearchResponse(base) }
+            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            val items = parseSearchItems(html)
+            items.mapNotNull { it.toSearchResponse() }
         } catch (e: Exception) {
             null
         }
     }
 
-    private fun SearchHit.toSearchResponse(base: String): SearchResponse? {
+    private fun SearchHit.toSearchResponse(): SearchResponse? {
         val u = url ?: return null
         val slug = Regex("""/detail/watch/([^/?]+)""").find(u)?.groupValues?.get(1) ?: return null
         val name = this.name ?: return null
         // Keep the "[مدبلج] ..." prefix so dubbed entries are obviously marked.
-        val poster = image?.let { if (it.startsWith("http")) it else base + it }
-        return newTvSeriesSearchResponse(name, "$base/detail/watch/$slug", TvType.TvSeries) {
+        val poster = image?.let { if (it.startsWith("http")) it else mainUrl + it }
+        return newTvSeriesSearchResponse(name, "$mainUrl/detail/watch/$slug", TvType.TvSeries) {
             this.posterUrl = poster
         }
     }
@@ -218,17 +216,12 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
-            val (base, body) = tryMirrors { b ->
-                app.get("$b/detail/watch/$slug", referer = nartoOrigin).text
-            } ?: return null
-
-            val doc = org.jsoup.Jsoup.parse(body)
+            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?: return null
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?.let { if (it.startsWith("http")) it else null }
             val description = doc.selectFirst("meta[name=description]")?.attr("content")
 
             val eps = doc.select("div.episode-list a.episode-item")
@@ -236,13 +229,13 @@ class NartoDramaProvider : MainAPI() {
                     val href = el.attr("href") ?: return@mapNotNull null
                     val ep = Regex("""/detail/watch/[^/]+/(\d+)""").find(href)?.groupValues?.get(1)
                         ?.toIntOrNull() ?: return@mapNotNull null
-                    newEpisode("$base/detail/watch/$slug/$ep") {
+                    newEpisode("$mainUrl/detail/watch/$slug/$ep") {
                         episode = ep
                         name = "الحلقة $ep"
                     }
                 }
 
-            newTvSeriesLoadResponse(title, base + "/detail/watch/$slug", TvType.TvSeries, eps) {
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 posterUrl = poster
                 plot = description
             }
@@ -256,9 +249,13 @@ class NartoDramaProvider : MainAPI() {
         return try {
             val (_, body) = tryMirrors { b: String ->
                 app.get("$b/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
-            } ?: return null
+            } ?: let {
+                android.util.Log.e("NartoDrama", "edgeRefreshSource no mirror served slug=$slug ep=$ep")
+                return null
+            }
             mapper.readValue(body, EdgeResponse::class.java)
         } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "edgeRefreshSource ERROR slug=$slug ep=$ep", e)
             null
         }
     }
