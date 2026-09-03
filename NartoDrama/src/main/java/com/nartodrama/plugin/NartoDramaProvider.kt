@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.jsoup.Jsoup
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -45,6 +46,7 @@ private data class EdgeResponse(
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,           // single external subtitle
     @JsonProperty("direct_subtitle_url") val directSubtitleUrl: String? = null, // single direct subtitle
     @JsonProperty("selected_subtitle_language") val selectedSubtitleLanguage: String? = null,
+    @JsonProperty("direct_audio_url") val directAudioUrl: String? = null,      // single standalone audio track
 )
 
 private data class EdgeResolution(
@@ -175,7 +177,15 @@ class NartoDramaProvider : MainAPI() {
         val t0 = System.currentTimeMillis()
         return try {
             val q = request.data.replace(" ", "+")
-            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            // Fail over across mirrors just like playback does — if the first mirror throws a
+            // Cloudflare challenge the next one serves the same catalog (fixes the "whole source
+            // goes empty when one link has Cloudflare while the other works" symptom for browsing).
+            val (_, html) = tryMirrors { b ->
+                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            } ?: run {
+                android.util.Log.e("NartoDrama", "getMainPage no mirror served q=$q")
+                return null
+            }
             val t1 = System.currentTimeMillis()
             android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${t1 - t0} len=${html.length} item=" + html.contains("\"@type\":\"ListItem\""))
             val items = parseSearchItems(html)
@@ -191,10 +201,17 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            // Fail over across mirrors (same body-based tryMirrors as getMainPage/playback).
+            val html = tryMirrors { b ->
+                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
+            }?.second ?: run {
+                android.util.Log.e("NartoDrama", "search no mirror served q=$q")
+                return null
+            }
             val items = parseSearchItems(html)
             items.mapNotNull { it.toSearchResponse() }
         } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "search ERROR q=$query", e)
             null
         }
     }
@@ -214,8 +231,16 @@ class NartoDramaProvider : MainAPI() {
         val t0 = System.currentTimeMillis()
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
-            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
-            android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0}")
+            // Fail over across mirrors; parse the served body. (.document isn't usable through
+            // tryMirrors, so fetch text and wrap it with Jsoup — jsoup is the same parser the SDK uses.)
+            val body = tryMirrors { b ->
+                app.get("$b/detail/watch/$slug", referer = nartoOrigin).text
+            }?.second ?: run {
+                android.util.Log.e("NartoDrama", "load no mirror served slug=$slug")
+                return null
+            }
+            val doc = try { Jsoup.parse(body) } catch (e: Exception) { return null }
+            android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
@@ -271,21 +296,34 @@ class NartoDramaProvider : MainAPI() {
             val ep = m.groupValues[2]
             var slug = m.groupValues[1]
 
-            var edge = edgeRefreshSource(slug, ep) ?: return false
+            var edge = edgeRefreshSource(slug, ep)
+            if (edge == null) {
+                android.util.Log.e("NartoDrama", "loadLinks NO EDGE (all mirrors failed or JSON parse error) slug=$slug ep=$ep")
+                return false
+            }
 
-            // If the source reports a stream error that is temporarily unavailable, surface a
-            // readable failure rather than silently returning nothing.
+            // Explicit transient outage — surface a readable failure instead of a useless empty list.
+            // (Driven by the API's own message string, not by guessing.)
             if (edge.ok != true && edge.message == "stream_temporarily_unavailable") return false
 
             // Canonical re-discovery: a requested slug may differ from the narto canonical one.
             if (edge.ok != true && edge.message == "slug_mismatch") {
                 val canon = edge.canonical?.let { Regex("""/detail/watch/([^/?]+)/""").find(it)?.groupValues?.get(1) }
                 if (canon != null && canon != slug) {
+                    android.util.Log.e("NartoDrama", "loadLinks slug_mismatch $slug -> $canon ep=$ep")
                     slug = canon
-                    edge = edgeRefreshSource(slug, ep) ?: return false
+                    edge = edgeRefreshSource(slug, ep)
+                    if (edge == null) return false
                 }
             }
-            if (edge.ok != true) return false
+            // Do NOT hard-bail on `ok != true` here — it is often ABSENT or typed as an int in the
+            // JSON, and Jackson leaves the Kotlin `Boolean?` null in that case (`null != true` would
+            // have dropped EVERY work -> "لم يتم العثور على روابط"). Only the two explicit messages
+            // above abort; otherwise we parse whatever play_url/direct_play_url/multi_resolutions the
+            // API returned. Log the actual edge state so real failures are visible in logcat.
+            if (edge.ok != true) {
+                android.util.Log.e("NartoDrama", "loadLinks edge.ok!=true (continuing anyway) slug=$slug ep=$ep msg=${edge.message} play=${edge.directPlayUrl?.take(60)} res=${edge.multiResolutions?.size}")
+            }
 
             // 1) subtitles — resolve relative /e/s/{jwt} paths on stream.narto-drama.com
             //    (narto-drama.com itself is CF-blocked). Emit EVERY subtitle the API offers:
@@ -371,12 +409,57 @@ class NartoDramaProvider : MainAPI() {
             // for "المسلسل يعرض حلقات ولا تشتغل": multi_res empty-but-dead no longer hides the good link.
             for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
 
-            // NOTE: NO standalone audio link is emitted — the user wants SUBTITLES ONLY, and the
-            // site exposes audio (ar-SA / stream_1 audio groups in the HLS master) which the player
-            // surfaces on its own. We do not surface voices as extra "files".
+            // 3) AUDIO — surface EVERY audio track the work carries (user: "اقسام الصوت اظهرها بالكامل"):
+            //    a) direct_audio_url — the API's standalone audio link (restored; it returned a
+            //       "صوت منفصل" castable track before the v7 "subtitles only" cleanup).
+            //    b) #EXT-X-MEDIA:TYPE=AUDIO groups in the HLS master(s) — fetched once from the first
+            //       HLS master we already have, each group's URI emitted as its own "صوت: NAME (LANG)" link.
+            // All audio work is best-effort and wrapped so it can NEVER drop the video links above.
+            val audioSeen = LinkedHashSet<String>()
+            edge.directAudioUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let { aud ->
+                val type = if (aud.lowercase().contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                if (audioSeen.add(aud)) {
+                    callback(newExtractorLink(source = name, name = "صوت منفصل", url = aud, type = type) {
+                        referer = nartoOrigin
+                        headers = mapOf("Referer" to nartoOrigin)
+                    })
+                    any = true
+                }
+            }
+            // Parse the AUDIO groups out of the first HLS master we emitted (a tiny extra fetch; the
+            // player would fetch it anyway, so this only *lists* what's already selected when playing).
+            val master = listOfNotNull(edge.directPlayUrl, edge.playUrl)
+                .firstOrNull { it.lowercase().contains("m3u8") || it.lowercase().contains("/e/m/") }
+            if (master != null) {
+                try {
+                    val masterBody = app.get(master, referer = nartoOrigin).text
+                    val audioUriTxt = Regex("""#EXT-X-MEDIA:TYPE=AUDIO[^\n]*""").findAll(masterBody).toList()
+                    val seenGroups = LinkedHashSet<String>()
+                    for (line in audioUriTxt) {
+                        val name = Regex("""NAME="([^"]*)"""").find(line.value)?.groupValues?.get(1) ?: "صوت"
+                        val lang = Regex("""LANGUAGE="([^"]*)"""").find(line.value)?.groupValues?.get(1)
+                        val uri = Regex("""URI="([^"]*)"""").find(line.value)?.groupValues?.get(1) ?: continue
+                        val resolved = if (uri.startsWith("http")) uri
+                        else java.net.URI(master).resolve(uri).toString()
+                        if (!seenGroups.add(resolved)) continue
+                        val label = lang?.let { "صوت: $name ($it)" } ?: "صوت: $name"
+                        callback(newExtractorLink(
+                            source = name, name = label, url = resolved, type = ExtractorLinkType.M3U8
+                        ) { referer = nartoOrigin; headers = mapOf("Referer" to nartoOrigin) })
+                        any = true
+                    }
+                    android.util.Log.e("NartoDrama", "loadLinks AUDIO master groups=${seenGroups.size} slug=$slug ep=$ep")
+                } catch (e: Exception) {
+                    android.util.Log.e("NartoDrama", "loadLinks AUDIO parse ERROR slug=$slug ep=$ep", e)
+                }
+            } else {
+                android.util.Log.e("NartoDrama", "loadLinks AUDIO no hls master to read groups slug=$slug ep=$ep play=${edge.directPlayUrl?.take(50)}")
+            }
 
+            android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} any=$any")
             any
         } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "loadLinks FATAL", e)
             false
         }
     }
