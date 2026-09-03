@@ -45,7 +45,6 @@ private data class EdgeResponse(
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,           // single external subtitle
     @JsonProperty("direct_subtitle_url") val directSubtitleUrl: String? = null, // single direct subtitle
     @JsonProperty("selected_subtitle_language") val selectedSubtitleLanguage: String? = null,
-    @JsonProperty("direct_audio_url") val directAudioUrl: String? = null,      // single standalone audio track
 )
 
 private data class EdgeResolution(
@@ -371,52 +370,12 @@ class NartoDramaProvider : MainAPI() {
                 first = false
             }
 
-            // 3) AUDIO — surface EVERY audio track the work carries (user: "اقسام الصوت اظهرها بالكامل"):
-            //    a) direct_audio_url — the API's standalone audio link (restored; it returned a
-            //       "صوت منفصل" castable track before the v7 "subtitles only" cleanup).
-            //    b) #EXT-X-MEDIA:TYPE=AUDIO groups in the HLS master(s) — fetched once from the first
-            //       HLS master we already have, each group's URI emitted as its own "صوت: NAME (LANG)" link.
-            // All audio work is best-effort and wrapped so it can NEVER drop the video links above.
-            val audioSeen = LinkedHashSet<String>()
-            edge.directAudioUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let { aud ->
-                val type = if (aud.lowercase().contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                if (audioSeen.add(aud)) {
-                    callback(newExtractorLink(source = name, name = "صوت منفصل", url = aud, type = type) {
-                        referer = nartoOrigin
-                        headers = mapOf("Referer" to nartoOrigin)
-                    })
-                    any = true
-                }
-            }
-            // Parse the AUDIO groups out of the first HLS master we emitted (a tiny extra fetch; the
-            // player would fetch it anyway, so this only *lists* what's already selected when playing).
-            val master = listOfNotNull(edge.directPlayUrl, edge.playUrl)
-                .firstOrNull { it.lowercase().contains("m3u8") || it.lowercase().contains("/e/m/") }
-            if (master != null) {
-                try {
-                    val masterBody = app.get(master, referer = nartoOrigin).text
-                    val audioUriTxt = Regex("""#EXT-X-MEDIA:TYPE=AUDIO[^\n]*""").findAll(masterBody).toList()
-                    val seenGroups = LinkedHashSet<String>()
-                    for (line in audioUriTxt) {
-                        val name = Regex("""NAME="([^"]*)"""").find(line.value)?.groupValues?.get(1) ?: "صوت"
-                        val lang = Regex("""LANGUAGE="([^"]*)"""").find(line.value)?.groupValues?.get(1)
-                        val uri = Regex("""URI="([^"]*)"""").find(line.value)?.groupValues?.get(1) ?: continue
-                        val resolved = if (uri.startsWith("http")) uri
-                        else java.net.URI(master).resolve(uri).toString()
-                        if (!seenGroups.add(resolved)) continue
-                        val label = lang?.let { "صوت: $name ($it)" } ?: "صوت: $name"
-                        callback(newExtractorLink(
-                            source = name, name = label, url = resolved, type = ExtractorLinkType.M3U8
-                        ) { referer = nartoOrigin; headers = mapOf("Referer" to nartoOrigin) })
-                        any = true
-                    }
-                    android.util.Log.e("NartoDrama", "loadLinks AUDIO master groups=${seenGroups.size} slug=$slug ep=$ep")
-                } catch (e: Exception) {
-                    android.util.Log.e("NartoDrama", "loadLinks AUDIO parse ERROR slug=$slug ep=$ep", e)
-                }
-            } else {
-                android.util.Log.e("NartoDrama", "loadLinks AUDIO no hls master to read groups slug=$slug ep=$ep play=${edge.directPlayUrl?.take(50)}")
-            }
+            // 3) MULTI-AUDIO as TRACKS, not links. The user wants the site's multiple audio tracks to
+            //    surface as AUDIO TRACKS in the player (مسارات الصوت) — NOT as separate audio links.
+            //    The video links above ARE the HLS masters; their #EXT-X-MEDIA:TYPE=AUDIO groups make
+            //    ExoPlayer populate the audio-track selector automatically. So we emit NO standalone
+            //    "صوت منفصل" link and NO separate "صوت:" group links — the player's native audio-track
+            //    switcher lists every audio (ar-SA / stream_1 / ...) when the chosen master is played.
 
             android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} any=$any")
             any
