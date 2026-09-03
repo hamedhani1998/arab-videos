@@ -182,18 +182,14 @@ class NartoDramaProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        // Browse hits the OPEN mirror (edge) DIRECTLY — NOT through tryMirrors. The CF-protected
+        // narto-drama.com fallback in tryMirrors made the whole page come back EMPTY on device when
+        // edge was slow/blank (the fallback then also got challenged -> null). This exact direct form
+        // is what showed the main page reliably in v6/v7. request.data is the tab's query string.
         val t0 = System.currentTimeMillis()
         return try {
-            val q = java.net.URLEncoder.encode(request.data, "UTF-8")
-            // Fail over across mirrors just like playback does — if the first mirror throws a
-            // Cloudflare challenge the next one serves the same catalog (fixes the "whole source
-            // goes empty when one link has Cloudflare while the other works" symptom for browsing).
-            val (_, html) = tryMirrors { b ->
-                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
-            } ?: run {
-                android.util.Log.e("NartoDrama", "getMainPage no mirror served q=$q")
-                return null
-            }
+            val q = request.data.trim()
+            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
             val t1 = System.currentTimeMillis()
             android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${t1 - t0} len=${html.length} item=" + html.contains("\"@type\":\"ListItem\""))
             val items = parseSearchItems(html)
@@ -207,15 +203,11 @@ class NartoDramaProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
+        // Direct to the OPEN mirror (edge), like getMainPage — not via the CF-prone tryMirrors
+        // fallback that could empty results on device. URL-encode the user's free-text query.
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            // Fail over across mirrors (same body-based tryMirrors as getMainPage/playback).
-            val html = tryMirrors { b ->
-                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
-            }?.second ?: run {
-                android.util.Log.e("NartoDrama", "search no mirror served q=$q")
-                return null
-            }
+            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
             val items = parseSearchItems(html)
             items.mapNotNull { it.toSearchResponse() }
         } catch (e: Exception) {
@@ -243,7 +235,7 @@ class NartoDramaProvider : MainAPI() {
             // directly to re-parse a text body is NOT reliably on the plugin classpath and made the
             // detail page fail after v8. Detail is a low-CF path; keep it on the direct mainUrl
             // form like v7 (browse/search/playback still fail over).
-            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
+            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).document
             android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()

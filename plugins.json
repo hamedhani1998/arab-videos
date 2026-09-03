@@ -459,7 +459,7 @@
  {
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-  "fileSize": 37070,
+  "fileSize": 36531,
   "status": 1,
   "language": "ar",
   "authors": [
@@ -469,7 +469,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 10,
+  "version": 11,
   "internalName": "NartoDrama",
   "description": "Narto Drama - مسلسلات دراما مترجمة",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/NartoDrama.cs3",
