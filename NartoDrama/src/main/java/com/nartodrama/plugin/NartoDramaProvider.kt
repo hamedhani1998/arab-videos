@@ -110,13 +110,20 @@ class NartoDramaProvider : MainAPI() {
         return null
     }
 
-    // Browse = two tabs, both driven by a STABLE text search. The empty query (q='') is the site's
-// "recommendations" feed but it intermittently returns HTTP 502 from edge (seen on the user's
-// device), so it is NOT used for browsing. The default tab uses "دراما" and the second is the
-// all-dubbed feed ("مدبلج"), both of which return consistently even when edge is under load.
+    // Main screen = one section per tab, each a distinct Arabic query (verified live: different
+// queries return DIFFERENT 24-item feeds, 0 overlap — so these are real categories, not the
+// same list repackaged). The empty query (q='') is the site's "recommendations" feed but it
+// intermittently returns HTTP 502 from edge, so it is NOT used. Each tab lazily fetches ONE
+// query only when opened (keeps browsing light — one ~400KB fetch per section).
     override val mainPage = mainPageOf(
-        "دراما" to "الأحدث والمقترحة",
-        "مدبلج" to "مسلسلات مدبلجة 🎙️",
+        "دراما" to "🎬 دراما",
+        "مدبلج" to "🎙️ مدبلج",
+        "رومانسي" to "💕 رومانسي",
+        "أكشن" to "⚔️ أكشن",
+        "كوميدي" to "😄 كوميدي",
+        "جريمة" to "🕵️ جريمة",
+        "تركي" to "🇹🇷 تركي",
+        "كوري" to "🇰🇷 كوري",
     )
 
     // The video-serve origin we must present to the edge/stream endpoints.
@@ -401,7 +408,13 @@ class NartoDramaProvider : MainAPI() {
             // proxy (stream-e1 /e/m or cdn.narto-drama.com MP4). Emitting them as fallbacks means a
             // work still plays even when every multi_resolutions token has lapsed. This is the fix
             // for "المسلسل يعرض حلقات ولا تشتغل": multi_res empty-but-dead no longer hides the good link.
-            for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
+            // Each survives as its OWN distinctly-named link so the list never shows two confusing
+// same-named entries (user: "تفصل كل رابط باضافه منفصله"). play -> كامل, direct -> رابط مباشر.
+            var first = true
+            for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) {
+                emit(u, if (first) "كامل" else "رابط مباشر", "1080p")
+                first = false
+            }
 
             // 3) AUDIO — surface EVERY audio track the work carries (user: "اقسام الصوت اظهرها بالكامل"):
             //    a) direct_audio_url — the API's standalone audio link (restored; it returned a
