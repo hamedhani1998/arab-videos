@@ -252,14 +252,30 @@ class NartoDramaProvider : MainAPI() {
     }
 
     // Fetch the narto edge refresh-source payload for a canonical slug+episode.
+    // NOTE: edge is the ONE open backend (single-domain — no mirror merging). It occasionally
+    // hiccups with a transient SocketTimeoutException on a play tap (e.g. wdth-kwryth-at had
+    // "java.net.SocketTimeoutException: timeout" then succeeded on the very next call ~1s later).
+    // edgeRefreshSource is a stateless GET, so on a network error we wait briefly and retry ONCE
+    // on the SAME domain — a resilience retry, not a mirror failover. Without it a one-off timeout
+    // swallowed the good response and the user saw "لم يتم العثور على روابط".
     private suspend fun edgeRefreshSource(slug: String, ep: String): EdgeResponse? {
-        return try {
-            val body = app.get("$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
-            mapper.readValue(body, EdgeResponse::class.java)
-        } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "edgeRefreshSource ERROR slug=$slug ep=$ep", e)
-            null
+        var attempt = 0
+        while (attempt < 2) {
+            attempt++
+            try {
+                val body = app.get("$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
+                val edge = mapper.readValue(body, EdgeResponse::class.java)
+                // A JSON parse that lands on an explicit edge outage isn't a retry candidate.
+                // A successful read (even ok!=true with other messages) is final.
+                return edge
+            } catch (e: Exception) {
+                android.util.Log.e("NartoDrama", "edgeRefreshSource ERROR attempt=$attempt/2 slug=$slug ep=$ep", e)
+                if (attempt < 2) {
+                    try { Thread.sleep(800) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
+                }
+            }
         }
+        return null
     }
 
     override suspend fun loadLinks(
