@@ -166,6 +166,46 @@ class Drama4AllProvider : MainAPI() {
         }
     }
 
+    // The /api/episode endpoint is server-side gated: a bare request returns HTTP 403
+    // {"error":"forbidden"} (Cloudflare-backed). The watch page embeds a short-lived signed
+    // ticket in JS: EP_TOKEN (hex) + EP_TOKEN_EXP (unix). The API only answers when called as
+    //   /api/episode/{slug}/{ep}?t={Date.now()}&exp={EP_TOKEN_EXP}&token={EP_TOKEN}
+    // The token is NOT per-episode: one watch page's token serves all episodes of the work
+    // (verified: ep=1 token fetched ep002 too). Window is short (~30s), so on a 403 we re-fetch
+    // a fresh watch page and retry once — same resilience pattern as the narto v16 retry.
+    private suspend fun signedEpisode(slug: String, ep: String): EpisodeItem? {
+        var attempt = 0
+        while (attempt < 2) {
+            attempt++
+            try {
+                // 1) fetch the watch page for THIS ep to obtain the live EP_TOKEN / EP_TOKEN_EXP
+                val watchHtml = app.get("$mainUrl/watch/$slug/$ep", referer = mainUrl).text
+                val token = Regex("""EP_TOKEN\s*=\s*"([^"]+)""").find(watchHtml)?.groupValues?.get(1)
+                val exp = Regex("""EP_TOKEN_EXP\s*=\s*(\d+)""").find(watchHtml)?.groupValues?.get(1)
+                if (token == null || exp == null) {
+                    android.util.Log.e("Drama4All", "signedEpisode token missing slug=$slug ep=$ep")
+                    // token absent -> can't sign -> give up (no point retrying the same page)
+                    return null
+                }
+                // 2) call the gated API with the signature (t = current epoch millis)
+                val t = System.currentTimeMillis()
+                val url = "$mainUrl/api/episode/$slug/$ep?t=$t&exp=$exp&token=${java.net.URLEncoder.encode(token, "UTF-8")}"
+                val json = app.get(url, referer = "$mainUrl/watch/$slug/$ep").text
+                if (json.contains("\"error\":\"forbidden\"")) {
+                    // token likely expired between page-load and now -> refetch once for a fresh one
+                    android.util.Log.e("Drama4All", "signedEpisode forbidden (retry) slug=$slug ep=$ep")
+                    if (attempt < 2) { Thread.sleep(600) ; continue }
+                    return null
+                }
+                return mapper.readValue(json, EpisodeItem::class.java)
+            } catch (e: Exception) {
+                android.util.Log.e("Drama4All", "signedEpisode error attempt=$attempt slug=$slug ep=$ep", e)
+                if (attempt < 2) { try { Thread.sleep(600) } catch (ei: InterruptedException) { Thread.currentThread().interrupt() } }
+            }
+        }
+        return null
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -178,12 +218,7 @@ class Drama4AllProvider : MainAPI() {
             val slug = m.groupValues[1]
             val ep = m.groupValues[2]
 
-            val json = app.get("$mainUrl/api/episode/$slug/$ep", referer = "$mainUrl/watch/$slug/$ep").text
-            val item = try {
-                mapper.readValue(json, EpisodeItem::class.java)
-            } catch (e: Exception) {
-                return false
-            }
+            val item = signedEpisode(slug, ep) ?: return false
             val vUrl = item.videoUrl ?: return false
 
             // 1) كل الترجمات/القرائن
@@ -197,46 +232,53 @@ class Drama4AllProvider : MainAPI() {
                 }
             }
 
-            // 2) تحليل الـ m3u8: هل هو master (جودات + أصوات متعددة) أم ملف جودة واحدة؟
-            val streamText = try { app.get(vUrl, referer = mainUrl).text } catch (e: Exception) { "" }
-
-            if (streamText.contains("#EXT-X-STREAM-INF")) {
-                // master playlist => رابط واحد كامل يحتوي كل الجودات المتاحة + الصوت.
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "Full HD (كل الجودات)",
-                        url = vUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        referer = mainUrl
-                        quality = getQualityFromName("1080p")
-                        headers = mapOf("Referer" to mainUrl)
-                    }
-                )
-            } else {
-                // ملف media وحيد (جودة واحدة): نكشف عنه مباشرة
+            // 2) الرابط: video_url على drama4all هو ملف مباشر (Cloudflare R2 .mp4 غالباً) — نكشف النوع
+            //    حسب الامتداد (مثل Narto inferStreamType) بدل افتراض M3U8 دائماً.
+            val isMp4 = vUrl.lowercase().contains(".mp4") || vUrl.lowercase().contains(".m4v")
+                || vUrl.lowercase().contains("mime_type=video_mp4")
+            if (isMp4) {
                 val q = when {
-                    vUrl.contains("1080p") -> "1080p"
-                    vUrl.contains("720p") -> "720p"
-                    vUrl.contains("480p") -> "480p"
+                    vUrl.contains("1080") -> "1080p"
+                    vUrl.contains("720") -> "720p"
+                    vUrl.contains("480") -> "480p"
                     else -> "480p"
                 }
                 callback(
-                    newExtractorLink(
-                        source = name,
-                        name = q,
-                        url = vUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
+                    newExtractorLink(source = name, name = q, url = vUrl, type = ExtractorLinkType.VIDEO) {
                         referer = mainUrl
                         quality = getQualityFromName(q)
                         headers = mapOf("Referer" to mainUrl)
                     }
                 )
+            } else {
+                // HLS: master (جودات متعددة) أم ملف media واحد؟
+                val streamText = try { app.get(vUrl, referer = mainUrl).text } catch (e: Exception) { "" }
+                if (streamText.contains("#EXT-X-STREAM-INF")) {
+                    callback(
+                        newExtractorLink(source = name, name = "Full HD (كل الجودات)", url = vUrl, type = ExtractorLinkType.M3U8) {
+                            referer = mainUrl
+                            quality = getQualityFromName("1080p")
+                            headers = mapOf("Referer" to mainUrl)
+                        }
+                    )
+                } else {
+                    val q = when {
+                        vUrl.contains("720") -> "720p"
+                        vUrl.contains("480") -> "480p"
+                        else -> "480p"
+                    }
+                    callback(
+                        newExtractorLink(source = name, name = q, url = vUrl, type = ExtractorLinkType.M3U8) {
+                            referer = mainUrl
+                            quality = getQualityFromName(q)
+                            headers = mapOf("Referer" to mainUrl)
+                        }
+                    )
+                }
             }
             true
         } catch (e: Exception) {
+            android.util.Log.e("Drama4All", "loadLinks FATAL", e)
             false
         }
     }
