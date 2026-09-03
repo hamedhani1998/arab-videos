@@ -64,51 +64,19 @@ private data class EdgeSub(
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
-// ---- Two (or more) mirror hosts of the same site ----
-// narto-drama.com is the original web host (Cloudflare-protected); edge.narto-drama.com is an
-// open backend with NO Cloudflare that serves the identical native Arabic catalog. Because either
-// one of them can one day start throwing a Cloudflare challenge (or the reverse), the provider
-// treats them as interchangeable mirrors and AUTO-FAILOVERS: it tries them in order and uses the
-// first that answers with real content, skipping any that return a CF-challenge page. The default-
-// override mainUrl is always tried first so the app "Clone + edit URL" native setting still wins.
-private val NARTO_MIRRORS = listOf("https://edge.narto-drama.com", "https://narto-drama.com")
-
-// Signatures of a Cloudflare interstitial (presents HTML regardless of HTTP status).
-private val CF_HINTS = listOf(
-    "cf-chl", "__cf_chl", "cf_chl", "challenge-platform", "Cloudflare",
-    "Attention Required", "Just a moment", "cf-error-details", "incapsula",
-)
-
+// ---- SINGLE domain (NO mirror merging) ----
+// edge.narto-drama.com is the ONE open backend (no Cloudflare) that serves the native Arabic
+// catalog. Previous versions auto-failed-over between edge and the Cloudflare-protected
+// narto-drama.com via tryMirrors — that MERGING of two domains is what broke the interface
+// display on device. Now EVERY request uses ONLY this single mainUrl. To point the source at
+// another link, clone it in CloudStream and edit the URL (the native "choose this link or that"
+// mechanism) — no code-side merging.
 class NartoDramaProvider : MainAPI() {
     override var name = "Narto Drama"
-    override var mainUrl = "https://edge.narto-drama.com"  // open backend (no Cloudflare)
+    override var mainUrl = "https://edge.narto-drama.com"  // single open backend (no Cloudflare)
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
-
-    // True if a body looks like a Cloudflare/bot interstitial rather than real content.
-    // NOTE: detection is on the BODY only — a 200/HTTP status alone is not trustworthy from the
-    // CloudStream client, so we never branch on `Response.code` (which isn't available anyway).
-    private fun isCfChallenge(body: String): Boolean {
-        val head = body.take(4000)
-        return CF_HINTS.any { head.contains(it, ignoreCase = true) }
-    }
-
-    // Run `fetch` against each mirror (mainUrl override first, then the rest) and return the first
-    // body that is NOT a Cloudflare challenge, together with the mirror base that served it. If any
-    // mirror throws on fetch, try the next; if every mirror is challenged/empty, return null.
-    private suspend fun tryMirrors(fetch: suspend (String) -> String?): Pair<String, String>? {
-        val order = buildList {
-            add(mainUrl)
-            for (m in NARTO_MIRRORS) if (m != mainUrl) add(m)
-        }
-        for (base in order) {
-            val body = try { fetch(base) } catch (e: Exception) { null }
-            if (body.isNullOrBlank()) continue
-            if (!isCfChallenge(body)) return base to body
-        }
-        return null
-    }
 
     // Main screen = one section per tab, each a distinct Arabic query (verified live: different
 // queries return DIFFERENT 24-item feeds, 0 overlap — so these are real categories, not the
@@ -234,7 +202,7 @@ class NartoDramaProvider : MainAPI() {
             // Use app.get(...).document (the SDK's own Jsoup-backed accessor) — importing Jsoup
             // directly to re-parse a text body is NOT reliably on the plugin classpath and made the
             // detail page fail after v8. Detail is a low-CF path; keep it on the direct mainUrl
-            // form like v7 (browse/search/playback still fail over).
+            // form like v7. (Single-domain now — no failover anywhere.)
             val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).document
             android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
@@ -267,12 +235,7 @@ class NartoDramaProvider : MainAPI() {
     // Fetch the narto edge refresh-source payload for a canonical slug+episode.
     private suspend fun edgeRefreshSource(slug: String, ep: String): EdgeResponse? {
         return try {
-            val (_, body) = tryMirrors { b: String ->
-                app.get("$b/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
-            } ?: let {
-                android.util.Log.e("NartoDrama", "edgeRefreshSource no mirror served slug=$slug ep=$ep")
-                return null
-            }
+            val body = app.get("$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
             mapper.readValue(body, EdgeResponse::class.java)
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "edgeRefreshSource ERROR slug=$slug ep=$ep", e)
