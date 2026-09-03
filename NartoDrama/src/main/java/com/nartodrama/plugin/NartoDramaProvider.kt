@@ -77,7 +77,16 @@ private val DEAD_HOST_PATTERNS = listOf("montagehub")
 // mechanism) — no code-side merging.
 class NartoDramaProvider : MainAPI() {
     override var name = "Narto Drama"
-    override var mainUrl = "https://edge.narto-drama.com"  // single open backend (no Cloudflare)
+    // MANUAL DOMAIN OPTION (no auto-failover — keeps browsing fast and never breaks the UI).
+    // `mainUrl` is an open override var, so the user can switch mirrors from CloudStream's native
+    // "Clone + edit URL" (the site's changing-link mechanism). Default stays on the FAST, OPEN
+    // mirror edge.narto-drama.com (direct IP, no Cloudflare). The alternative mirror
+    // narto-drama.com is Cloudflare-protected (~10s responses) — it would slow browse/search and
+    // re-break the interface if auto-merged (the v8–v11 lesson that v12 fixed by going single-domain).
+    // Swap happens MANUALLY and only if the user wants to try the other host:
+    //   - https://edge.narto-drama.com     (DEFAULT — open, fast, no CF)
+    //   - https://narto-drama.com          (manual alternative — Cloudflare, slower)
+    override var mainUrl = "https://edge.narto-drama.com"
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
