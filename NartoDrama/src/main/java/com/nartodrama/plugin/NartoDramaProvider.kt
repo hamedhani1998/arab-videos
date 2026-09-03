@@ -41,6 +41,11 @@ private data class EdgeResponse(
     @JsonProperty("play_url") val playUrl: String? = null,
     @JsonProperty("multi_resolutions") val multiResolutions: List<EdgeResolution>? = null,
     @JsonProperty("multi_subtitles") val multiSubtitles: List<EdgeSub>? = null,
+    // Single-track fields the API also returns (used when multi_* is empty / has exactly one entry).
+    @JsonProperty("subtitle_url") val subtitleUrl: String? = null,           // single external subtitle
+    @JsonProperty("direct_subtitle_url") val directSubtitleUrl: String? = null, // single direct subtitle
+    @JsonProperty("direct_audio_url") val directAudioUrl: String? = null,      // single separate audio track
+    @JsonProperty("selected_subtitle_language") val selectedSubtitleLanguage: String? = null,
 )
 
 private data class EdgeResolution(
@@ -59,12 +64,49 @@ private data class EdgeSub(
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
+// ---- Two (or more) mirror hosts of the same site ----
+// narto-drama.com is the original web host (Cloudflare-protected); edge.narto-drama.com is an
+// open backend with NO Cloudflare that serves the identical native Arabic catalog. Because either
+// one of them can one day start throwing a Cloudflare challenge (or the reverse), the provider
+// treats them as interchangeable mirrors and AUTO-FAILOVERS: it tries them in order and uses the
+// first that answers with real content, skipping any that return a CF-challenge page. The default-
+// override mainUrl is always tried first so the app "Clone + edit URL" native setting still wins.
+private val NARTO_MIRRORS = listOf("https://edge.narto-drama.com", "https://narto-drama.com")
+
+// Signatures of a Cloudflare interstitial (presents HTML regardless of HTTP status).
+private val CF_HINTS = listOf(
+    "cf-chl", "__cf_chl", "cf_chl", "challenge-platform", "Cloudflare",
+    "Attention Required", "Just a moment", "cf-error-details", "incapsula",
+)
+
 class NartoDramaProvider : MainAPI() {
     override var name = "Narto Drama"
     override var mainUrl = "https://edge.narto-drama.com"  // open backend (no Cloudflare)
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
+
+    // True if an HTTP result is a Cloudflare/bot interstitial rather than real content.
+    private fun isCfChallenge(status: Int, body: String): Boolean {
+        if (status == 403 || status == 503) return true
+        val head = body.take(4000)
+        return CF_HINTS.any { head.contains(it, ignoreCase = true) }
+    }
+
+    // Run `fetch` against each mirror (mainUrl override first, then the rest) and return the first
+    // response that is NOT a Cloudflare challenge, together with the mirror base that served it. If
+    // every mirror is challenged, return null so callers can fail gracefully.
+    private suspend fun tryMirrors(fetch: suspend (String) -> Pair<Int, String>): Pair<String, Pair<Int, String>>? {
+        val order = buildList {
+            add(mainUrl)
+            for (m in NARTO_MIRRORS) if (m != mainUrl) add(m)
+        }
+        for (base in order) {
+            val r = try { fetch(base) } catch (e: Exception) { null } ?: continue
+            if (!isCfChallenge(r.first, r.second)) return base to r
+        }
+        return null
+    }
 
     // Curated seed queries mirroring the native Narto home: a generic feed, the all-dubbed
     // مدبلج feed, and a general drama feed. The empty query returns the default browse list.
@@ -135,11 +177,13 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val q = request.data.replace(" ", "+")
-            val url = "$mainUrl/search?lang=ar-SA&q=$q"
-            val doc = app.get(url, referer = nartoOrigin).text
-            val items = parseSearchItems(doc)
+            val (base, res) = tryMirrors { b ->
+                val r = app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin)
+                r.code to r.text
+            } ?: return null
+            val items = parseSearchItems(res.second)
             if (items.isEmpty()) return null
-            val list = items.mapNotNull { it.toSearchResponse() }
+            val list = items.mapNotNull { it.toSearchResponse(base) }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {
             null
@@ -149,21 +193,24 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val res = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
-            val items = parseSearchItems(res)
-            items.mapNotNull { it.toSearchResponse() }
+            val (base, res) = tryMirrors { b ->
+                val r = app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin)
+                r.code to r.text
+            } ?: return null
+            val items = parseSearchItems(res.second)
+            items.mapNotNull { it.toSearchResponse(base) }
         } catch (e: Exception) {
             null
         }
     }
 
-    private fun SearchHit.toSearchResponse(): SearchResponse? {
+    private fun SearchHit.toSearchResponse(base: String): SearchResponse? {
         val u = url ?: return null
         val slug = Regex("""/detail/watch/([^/?]+)""").find(u)?.groupValues?.get(1) ?: return null
         val name = this.name ?: return null
         // Keep the "[مدبلج] ..." prefix so dubbed entries are obviously marked.
-        val poster = image?.let { if (it.startsWith("http")) it else mainUrl + it }
-        return newTvSeriesSearchResponse(name, "$mainUrl/detail/watch/$slug", TvType.TvSeries) {
+        val poster = image?.let { if (it.startsWith("http")) it else base + it }
+        return newTvSeriesSearchResponse(name, "$base/detail/watch/$slug", TvType.TvSeries) {
             this.posterUrl = poster
         }
     }
@@ -171,12 +218,18 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
-            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
+            val (base, res) = tryMirrors { b ->
+                val r = app.get("$b/detail/watch/$slug", referer = nartoOrigin)
+                r.code to r.text
+            } ?: return null
+
+            val doc = org.jsoup.Jsoup.parse(res.second)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?: return null
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?.let { if (it.startsWith("http")) it else null }
             val description = doc.selectFirst("meta[name=description]")?.attr("content")
 
             val eps = doc.select("div.episode-list a.episode-item")
@@ -184,13 +237,13 @@ class NartoDramaProvider : MainAPI() {
                     val href = el.attr("href") ?: return@mapNotNull null
                     val ep = Regex("""/detail/watch/[^/]+/(\d+)""").find(href)?.groupValues?.get(1)
                         ?.toIntOrNull() ?: return@mapNotNull null
-                    newEpisode("$mainUrl/detail/watch/$slug/$ep") {
+                    newEpisode("$base/detail/watch/$slug/$ep") {
                         episode = ep
                         name = "الحلقة $ep"
                     }
                 }
 
-            newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
+            newTvSeriesLoadResponse(title, base + "/detail/watch/$slug", TvType.TvSeries, eps) {
                 posterUrl = poster
                 plot = description
             }
@@ -202,9 +255,11 @@ class NartoDramaProvider : MainAPI() {
     // Fetch the narto edge refresh-source payload for a canonical slug+episode.
     private suspend fun edgeRefreshSource(slug: String, ep: String): EdgeResponse? {
         return try {
-            val edgeUrl = "$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx"
-            val res = app.get(edgeUrl, referer = nartoOrigin).text
-            mapper.readValue(res, EdgeResponse::class.java)
+            val mirror = tryMirrors { b: String ->
+                val r = app.get("$b/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin)
+                r.code to r.text
+            } ?: return null
+            mapper.readValue(mirror.second.second, EdgeResponse::class.java)
         } catch (e: Exception) {
             null
         }
@@ -238,11 +293,29 @@ class NartoDramaProvider : MainAPI() {
             }
             if (edge.ok != true) return false
 
-            // 1) subtitles — resolved on stream.narto-drama.com (narto-drama.com itself is CF-blocked)
-            edge.multiSubtitles?.forEach { s ->
-                val rel = s.subtitleUrl?.takeIf { it.isNotBlank() } ?: return@forEach
-                val lang = s.label?.takeIf { it.isNotBlank() } ?: s.languageCode ?: "ترجمة"
+            // 1) subtitles — resolve relative /e/s/{jwt} paths on stream.narto-drama.com
+            //    (narto-drama.com itself is CF-blocked). Emit EVERY subtitle the API offers:
+            //    the full multi_subtitles set plus any single track (subtitle_url /
+            //    direct_subtitle_url) that appears alone instead. Nothing the site returns is dropped.
+            val seenSubs = LinkedHashSet<String>()
+            val subTracks = buildList {
+                edge.multiSubtitles.orEmpty().forEach { s ->
+                    val rel = s.subtitleUrl?.takeIf { it.isNotBlank() } ?: return@forEach
+                    val lang = s.label?.takeIf { it.isNotBlank() } ?: s.languageCode ?: "ترجمة"
+                    add(lang to rel)
+                }
+                // Single external subtitle (may be absolute http or relative /e/s/...).
+                edge.subtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
+                    add((edge.selectedSubtitleLanguage?.takeIf { l -> l.isNotBlank() } ?: "ترجمة") to it)
+                }
+                // Single direct subtitle (absolute or relative).
+                edge.directSubtitleUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
+                    add("ترجمة مباشرة" to it)
+                }
+            }
+            for ((lang, rel) in subTracks) {
                 val subUrl = if (rel.startsWith("http")) rel else STREAM_HOST + rel
+                if (!seenSubs.add(subUrl)) continue
                 try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
             }
 
@@ -300,6 +373,22 @@ class NartoDramaProvider : MainAPI() {
             // work still plays even when every multi_resolutions token has lapsed. This is the fix
             // for "المسلسل يعرض حلقات ولا تشتغل": multi_res empty-but-dead no longer hides the good link.
             for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
+
+            // 3) a standalone audio track when the API provides one (e.g. a dubbed/original audio
+            //    file separate from the video). Most narto works mux the audio into the video/HLS
+            //    stream instead, in which case the player exposes the voices directly from the
+            //    master — no separate link is needed. Only emit when direct_audio_url is actually set.
+            edge.directAudioUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
+                if (emitted.add(it)) {
+                    callback(
+                        newExtractorLink(source = name, name = "صوت منفصل", url = it, type = ExtractorLinkType.VIDEO) {
+                            referer = nartoOrigin
+                            headers = mapOf("Referer" to nartoOrigin)
+                        }
+                    )
+                    any = true
+                }
+            }
 
             any
         } catch (e: Exception) {
