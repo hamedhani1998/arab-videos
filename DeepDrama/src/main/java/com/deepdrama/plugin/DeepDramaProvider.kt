@@ -65,6 +65,30 @@ class DeepDramaProvider : MainAPI() {
 
     private fun headers() = mapOf("User-Agent" to DD_UA)
 
+    // رؤوس لجلب ملف ترجمة من خادم معيّن: Seepixو headers للسيرفر لتجنّب ردّ 403
+    // (صفحة خطأ HTML تُعرض كرموز). vidaraa يتطلب Referer/Origin؛ Rumble يكفي UA.
+    private fun subHeaders(serverName: String): Map<String, String> =
+        if (serverName.contains("vidaraa", ignoreCase = true))
+            mapOf(
+                "User-Agent" to DD_UA,
+                "Referer" to "https://vidaraa.cc/",
+                "Origin" to "https://vidaraa.cc",
+            )
+        else
+            mapOf("User-Agent" to DD_UA)
+
+    /**
+     * خلاصة التحقق القاطع من مصدر الترجمات:
+     * يخدّم vidaraa و Rumble ملفات .vtt متطابقة ومضاعفة-الترميز — نصٌّ عربي حُوّل
+     * خطأً إلى UTF-8 مزدوج (مثلاً "لكن" → "ÙÙÙÙ"). كشفُ الفكّ (ISO_8859_1 → UTF_8)
+     * يسترجع العربية في 681 سطراً من كلٍّ منهما، لكن صندوق CloudStream لـ plugins
+     * لا يوفّر أي وسيلةٍ لتوجيه بايتاتٍ مصححةٍ إلى المشغّل: SubtitleFile لا يحمل سوى
+     * lang/url/headers (ولا حقل محتوى)، والمشغّل يرفض data:، والـ plugin لا يملك
+     * Context لكتابة ملفٍ محلي. لهذا نعرض الترجمة برابطها ورؤوسها الصحيحة كما
+     * يوفّرها السيرفر — وهو الخيار الوحيد الذي يقبله المشغّل فعلاً.
+     */
+    private val mojibakeDiagnosticNote = Unit
+
     // نتيجة فكّ روابط خادم: الـ master التكيفي + الجودات الفردية + الترجمات + الصوت.
     private data class ServerResolved(
         val name: String,               // اسم الخادم للعرض
@@ -427,11 +451,18 @@ class DeepDramaProvider : MainAPI() {
             })
         }
 
-        // 4) ملفات الترجمة (كل لغة يوفّرها الخادم). نمرّرها برابطها المباشر
-        // (كما أثبت v4) حتى تظهر وتُختار في المشغّل دون إخفائها.
+        // 4) ملفات الترجمة (كل لغة يوفّرها الخادم). نمرّرها برابطها المباشر برؤوس
+        // قياسية صحيحة (User-Agent + Referer/Origin للخادم الصادر) حتى لا يردّ
+        // السيرفر بصفحة خطأ 403 تُعرض كرموز. (ملاحظة: محتوى ملفات .vtt عند
+        // المصدر الأعلى مضاعف-الترميز في كلا الخادمين؛ لا يمكن للـ plugin إعادة
+        // ترميزه لأنه لا يملك حقنَ محتوى ولا Context — انظر mojibakeDiagnosticNote.)
         server.subtitles.forEach { sub ->
             try {
-                subtitleCallback(newSubtitleFile(sub.label, sub.url))
+                subtitleCallback(
+                    newSubtitleFile(sub.label, sub.url) {
+                        this.headers = subHeaders(server.name)
+                    }
+                )
             } catch (_: Exception) {}
         }
     }
@@ -447,39 +478,51 @@ class DeepDramaProvider : MainAPI() {
 
             // بيانات الحلقة: روابط الخوادم مفصولة بـ ||| (vidaraa أولاً = الافتراضي)
             val serverUrls = data.split("|||").map { it.trim() }.filter { it.startsWith("http") && it.isNotBlank() }
+            if (serverUrls.isEmpty()) return false
 
             // نجهّز قائمة الخوادم بحسب أولويتها، ونتجنب أي تكرار في العناوين.
+            // لا نعتمد فقط على الذاكرة المؤقتة (load قد يفشل في تسخينها عند الرجوع
+            // السريع)، بل نعيد الفكّ هنا فوراً — لضمان أن التشغيل لا 'ينكسر' عند العودة.
             val resolved = mutableListOf<ServerResolved>()
             var vidaraaEmitted = false
             var rumbleEmitted = false
 
-            serverUrls.forEach { s ->
-                val resolvedServer = when {
-                    s.contains("vidaraa") && !vidaraaEmitted -> {
-                        vidaraaEmitted = true
-                        resolveVidaraa(s)
+            for (s in serverUrls) {
+                val resolvedServer = try {
+                    when {
+                        s.contains("vidaraa") && !vidaraaEmitted -> {
+                            vidaraaEmitted = true
+                            resolveVidaraa(s)
+                        }
+                        s.contains("rumble") && !rumbleEmitted -> {
+                            rumbleEmitted = true
+                            resolveRumble(s)
+                        }
+                        else -> null
                     }
-                    s.contains("rumble") && !rumbleEmitted -> {
-                        rumbleEmitted = true
-                        resolveRumble(s)
+                } catch (_: Exception) { null }
+
+                if (resolvedServer != null) {
+                    // نبثّ هذا الخادم فور حلّه، قبل الانتظار على الخادم الآخر —
+                    // فيبدأ الفيديو بسرعة ولا ينتظر المحاولتين معاً.
+                    emitServer(resolvedServer, resolved.isEmpty(), subtitleCallback, callback)
+                    if (resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
+                        resolvedServer.directVideo != null) {
+                        resolved.add(resolvedServer)
                     }
-                    else -> null
-                }
-                if (resolvedServer != null && (resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
-                            resolvedServer.directVideo != null)) {
-                    resolved.add(resolvedServer)
                 }
             }
 
+            // لا نستخدم أبداً loadExtractor العام هنا: iframes DeepDrama ليست
+            // extensions قابلة للفهم وتفشل، فتسبب 'لا يفتح'. إن لم تُحلّ أي نتيجة
+            // نظهر الحقيقة بشأن الخادم الفاشل بدلاً من واجهة ميتة.
             if (resolved.isEmpty()) {
-                // لم يُحل أي خادم — نجرب مستخرج CloudStream العام كاحتياط أخير.
-                serverUrls.forEach { loadExtractor(it, mainUrl, subtitleCallback, callback) }
-            } else {
-                // نعرض ترجمات كل خادم كما هي (مسمّاة باسم خادمها) ليختار المستخدم التي
-                // تعمل بصورة صحيحة لديه. (ترجمة vidaraa قد تكون مشوّهة الترميز في مصدرها،
-                // بينما ترجمة Rumble نظيفة؛ التمييز بالاسم يتيح الاختيار الصحيح.)
-                resolved.forEachIndexed { idx, srv ->
-                    emitServer(srv, idx == 0, subtitleCallback, callback)
+                // آخر محاولة: إن لم يُحلّ شيء، نحاول مرة أخرى على أول رابط عبر
+                // مسار vidaraa/rumble مُجدداً (ربما كان فشلٌ عابر في الشبكة).
+                val first = serverUrls.firstOrNull()
+                if (first != null) {
+                    val retry = if (first.contains("rumble")) resolveRumble(first) else resolveVidaraa(first)
+                    emitServer(retry, true, subtitleCallback, callback)
                 }
             }
             true

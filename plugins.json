@@ -599,7 +599,7 @@
   {
     "apiVersion": 1,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-    "fileSize": 33143,
+    "fileSize": 33288,
     "status": 1,
     "language": "ar",
     "authors": [
@@ -609,7 +609,7 @@
       "TvSeries",
       "Movie"
     ],
-    "version": 9,
+    "version": 10,
     "internalName": "DeepDrama",
     "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
     "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/DeepDrama.cs3",
