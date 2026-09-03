@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
 
 private val mapper = ObjectMapper().registerKotlinModule()
     .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
@@ -137,7 +136,9 @@ class NartoDramaProvider : MainAPI() {
     // was the "التشغيل بطيء" delay; classifying from the URL is instant.
     private fun inferStreamType(url: String): ExtractorLinkType {
         val lower = url.lowercase()
-        if (lower.contains("mime_type=video_mp4") || lower.endsWith(".mp4") || lower.endsWith(".m4v"))
+        // "contains" (NOT endsWith) so a signed direct-MP4 like `file.mp4?token=abc` — which ends in
+        // the query string, not `.mp4` — still classifies as VIDEO and plays (was misread as M3U8).
+        if (lower.contains("mime_type=video_mp4") || lower.contains(".mp4") || lower.endsWith(".m4v"))
             return ExtractorLinkType.VIDEO
         // M3U8 is the dominant container across narto's backends (shortmax/-stream, proxy /e/m/,
         // akamai) — ambiguous token URLs default to HLS rather than block on a network probe.
@@ -176,7 +177,7 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val t0 = System.currentTimeMillis()
         return try {
-            val q = request.data.replace(" ", "+")
+            val q = java.net.URLEncoder.encode(request.data, "UTF-8")
             // Fail over across mirrors just like playback does — if the first mirror throws a
             // Cloudflare challenge the next one serves the same catalog (fixes the "whole source
             // goes empty when one link has Cloudflare while the other works" symptom for browsing).
@@ -231,15 +232,11 @@ class NartoDramaProvider : MainAPI() {
         val t0 = System.currentTimeMillis()
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
-            // Fail over across mirrors; parse the served body. (.document isn't usable through
-            // tryMirrors, so fetch text and wrap it with Jsoup — jsoup is the same parser the SDK uses.)
-            val body = tryMirrors { b ->
-                app.get("$b/detail/watch/$slug", referer = nartoOrigin).text
-            }?.second ?: run {
-                android.util.Log.e("NartoDrama", "load no mirror served slug=$slug")
-                return null
-            }
-            val doc = try { Jsoup.parse(body) } catch (e: Exception) { return null }
+            // Use app.get(...).document (the SDK's own Jsoup-backed accessor) — importing Jsoup
+            // directly to re-parse a text body is NOT reliably on the plugin classpath and made the
+            // detail page fail after v8. Detail is a low-CF path; keep it on the direct mainUrl
+            // form like v7 (browse/search/playback still fail over).
+            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
             android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
@@ -360,10 +357,7 @@ class NartoDramaProvider : MainAPI() {
 
             suspend fun emit(u: String, label: String, q: String) {
                 if (u.isBlank() || !emitted.add(u)) return
-                val t0 = System.currentTimeMillis()
                 val type = inferStreamType(u)
-                val ts = System.currentTimeMillis() - t0
-                if (ts > 500) android.util.Log.e("NartoDrama", "emit slow $label typeMs=$ts $u")
                 callback(
                     newExtractorLink(source = name, name = label, url = u, type = type) {
                         referer = nartoOrigin
