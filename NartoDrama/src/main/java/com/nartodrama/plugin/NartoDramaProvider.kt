@@ -44,7 +44,6 @@ private data class EdgeResponse(
     // Single-track fields the API also returns (used when multi_* is empty / has exactly one entry).
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,           // single external subtitle
     @JsonProperty("direct_subtitle_url") val directSubtitleUrl: String? = null, // single direct subtitle
-    @JsonProperty("direct_audio_url") val directAudioUrl: String? = null,      // single separate audio track
     @JsonProperty("selected_subtitle_language") val selectedSubtitleLanguage: String? = null,
 )
 
@@ -110,12 +109,12 @@ class NartoDramaProvider : MainAPI() {
         return null
     }
 
-    // Browse = default feed + a dedicated dubbed tab. edge's /search responses are LARGE (300–450 KB)
-    // and SLOW (2.5–3.7s measured even on a desktop), so a multi-tab home (3+ big searches) was the
-    // "التصفح ثقيل" problem. The empty query (q='') returns the site's default feed in ONE request
-    // (fast); the مدبلج tab is the value the user wants. Full search is available in the app too.
+    // Browse = two tabs, both driven by a STABLE text search. The empty query (q='') is the site's
+// "recommendations" feed but it intermittently returns HTTP 502 from edge (seen on the user's
+// device), so it is NOT used for browsing. The default tab uses "دراما" and the second is the
+// all-dubbed feed ("مدبلج"), both of which return consistently even when edge is under load.
     override val mainPage = mainPageOf(
-        "" to "الأحدث والمقترحة",
+        "دراما" to "الأحدث والمقترحة",
         "مدبلج" to "مسلسلات مدبلجة 🎙️",
     )
 
@@ -372,21 +371,9 @@ class NartoDramaProvider : MainAPI() {
             // for "المسلسل يعرض حلقات ولا تشتغل": multi_res empty-but-dead no longer hides the good link.
             for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) emit(u, "كامل", "1080p")
 
-            // 3) a standalone audio track when the API provides one (e.g. a dubbed/original audio
-            //    file separate from the video). Most narto works mux the audio into the video/HLS
-            //    stream instead, in which case the player exposes the voices directly from the
-            //    master — no separate link is needed. Only emit when direct_audio_url is actually set.
-            edge.directAudioUrl?.takeIf { it.isNotBlank() && !it.contains("undefined") }?.let {
-                if (emitted.add(it)) {
-                    callback(
-                        newExtractorLink(source = name, name = "صوت منفصل", url = it, type = ExtractorLinkType.VIDEO) {
-                            referer = nartoOrigin
-                            headers = mapOf("Referer" to nartoOrigin)
-                        }
-                    )
-                    any = true
-                }
-            }
+            // NOTE: NO standalone audio link is emitted — the user wants SUBTITLES ONLY, and the
+            // site exposes audio (ar-SA / stream_1 audio groups in the HLS master) which the player
+            // surfaces on its own. We do not surface voices as extra "files".
 
             any
         } catch (e: Exception) {
