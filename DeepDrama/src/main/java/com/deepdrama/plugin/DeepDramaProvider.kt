@@ -388,10 +388,18 @@ class DeepDramaProvider : MainAPI() {
                 if (size == 0) add(primary.substringBefore("?"))
             }.joinToString("|||")
 
-            // نعيد تدفئة ذاكرة التخزين لكلا الخادمين الآن (أثناء عرض التفاصيل)
-            // حتى لا ينتظر التشغيل إطلاقًا.
-            vidaraa?.let { try { resolveVidaraa(it.substringBefore("?")) } catch (_: Exception) {} }
-            rumble?.let { try { resolveRumble(it.substringBefore("?")) } catch (_: Exception) {} }
+            // نُسخّن ذاكرة التخزين للخادم الأساسي فقط أثناء عرض التفاصيل حتى يكون أول
+            // تشغيل فورياً: vidaraa حلّه سريع (~0.5s) فيُفضَّل؛ وإن كان الأساسي Rumble
+            // (فيديو بلا vidaraa) نُسخّنه لأن التشغيل سيبدأ به. لا نُسخّن الخادم
+            // الثاني (البديل) هنا لأنه أبطأ ويحجب ظهورَ التفاصيل؛ يُحلّ عند حاجته
+            // في loadLinks. بهذا تظهر صفحة التفاصيل سريعة ولا يتأخر أول تشغيل.
+            val warmNormalized = (if (vidaraa != null) vidaraa else rumble) ?: primary
+            when {
+                warmNormalized.contains("vidaraa") ->
+                    try { resolveVidaraa(warmNormalized.substringBefore("?")) } catch (_: Exception) {}
+                warmNormalized.contains("rumble") ->
+                    try { resolveRumble(warmNormalized.substringBefore("?")) } catch (_: Exception) {}
+            }
 
             val episode = newEpisode(bundle) {
                 name = "الحلقة الكاملة"
