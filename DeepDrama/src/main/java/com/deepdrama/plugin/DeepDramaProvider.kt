@@ -177,7 +177,9 @@ class DeepDramaProvider : MainAPI() {
         resolveCache["vidaraa:$embedUrl"]?.let { return it }
         val filecode = vidaraaFilecode(embedUrl) ?: return ServerResolved("vidaraa", null, emptyList(), emptyList(), null)
         var streamUrl: String? = null
-        var subs = emptyList<SubtitleTrack>()
+        // ملاحظة: ترجمة vidaraa مشوّهة الترميز (mojibake) في مصدرها، فنتجاهلها تمامًا.
+        // نعتمد ترجمة Rumble النظيفة (عند توفّره) لتظهر الترجمة صحيحة على الشاشة.
+        val subs = emptyList<SubtitleTrack>()
         try {
             val body = mapper.writeValueAsString(mapOf("filecode" to filecode, "device" to "web"))
             val resp = app.post(
@@ -192,16 +194,6 @@ class DeepDramaProvider : MainAPI() {
             ).text
             val node = mapper.readTree(resp)
             streamUrl = node.get("streaming_url")?.asText()?.takeIf { it.isNotBlank() }
-            // الترجمات: قائمة عناصر {file_path, language}
-            val subArr = node.get("subtitles")
-            if (subArr != null && subArr.isArray) {
-                subs = subArr.mapNotNull { s ->
-                    val path = s.get("file_path")?.asText()?.takeIf { it.isNotBlank() }
-                        ?: return@mapNotNull null
-                    val lang = s.get("language")?.asText().orEmpty().ifBlank { "العربية" }
-                    SubtitleTrack(lang, path)
-                }
-            }
         } catch (_: Exception) { streamUrl = null }
 
         // جودات vidaraa من الـ master (روابط index_XXX.m3u8 — playlists صحيحة، آمنة للتشغيل)
