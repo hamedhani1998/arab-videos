@@ -125,7 +125,7 @@ class DeepDramaProvider : MainAPI() {
                         val path = info.get("path")?.asText()?.takeIf { it.isNotBlank() }
                         val langName = info.get("language")?.asText().orEmpty()
                         if (path != null) {
-                            subs.add(SubtitleTrack(langName.ifBlank { lang }, path))
+                            subs.add(SubtitleTrack("${langName.ifBlank { lang }} (Rumble)", path))
                         }
                     }
                 }
@@ -177,9 +177,7 @@ class DeepDramaProvider : MainAPI() {
         resolveCache["vidaraa:$embedUrl"]?.let { return it }
         val filecode = vidaraaFilecode(embedUrl) ?: return ServerResolved("vidaraa", null, emptyList(), emptyList(), null)
         var streamUrl: String? = null
-        // ملاحظة: ترجمة vidaraa مشوّهة الترميز (mojibake) في مصدرها، فنتجاهلها تمامًا.
-        // نعتمد ترجمة Rumble النظيفة (عند توفّره) لتظهر الترجمة صحيحة على الشاشة.
-        val subs = emptyList<SubtitleTrack>()
+        var subs = emptyList<SubtitleTrack>()
         try {
             val body = mapper.writeValueAsString(mapOf("filecode" to filecode, "device" to "web"))
             val resp = app.post(
@@ -194,6 +192,17 @@ class DeepDramaProvider : MainAPI() {
             ).text
             val node = mapper.readTree(resp)
             streamUrl = node.get("streaming_url")?.asText()?.takeIf { it.isNotBlank() }
+            // ترجمة vidaraa: قائمة عناصر {file_path, language}. قد تكون الترميز مشوّه
+            // في بعض الفيديوات (mojibake)؛ نُسمّيها باسم الخادم ليختار المستخدم.
+            val subArr = node.get("subtitles")
+            if (subArr != null && subArr.isArray) {
+                subs = subArr.mapNotNull { s ->
+                    val path = s.get("file_path")?.asText()?.takeIf { it.isNotBlank() }
+                        ?: return@mapNotNull null
+                    val lang = s.get("language")?.asText().orEmpty().ifBlank { "العربية" }
+                    SubtitleTrack("$lang (vidaraa)", path)
+                }
+            }
         } catch (_: Exception) { streamUrl = null }
 
         // جودات vidaraa من الـ master (روابط index_XXX.m3u8 — playlists صحيحة، آمنة للتشغيل)
@@ -466,19 +475,11 @@ class DeepDramaProvider : MainAPI() {
                 // لم يُحل أي خادم — نجرب مستخرج CloudStream العام كاحتياط أخير.
                 serverUrls.forEach { loadExtractor(it, mainUrl, subtitleCallback, callback) }
             } else {
-                // الترجمة الصحيحة للعرض: ترجمة Rumble (نظيفة — كما أثبت v4) هي المرجع الموثوق،
-                // أمّا ترجمة vidaraa فمشوّهة الترميز (mojibake). لذلك عند توفّر Rumble
-                // نستعمل ترجمته النظيفة حتى عند اختيار vidaraa، تجنّبًا للرموز المشوهة.
-                val cleanSubs = resolved.asSequence()
-                    .firstOrNull { it.name.contains("Rumble") && it.subtitles.isNotEmpty() }
-                    ?.subtitles
-                    ?.distinctBy { it.url }
-                    ?.toList()
+                // نعرض ترجمات كل خادم كما هي (مسمّاة باسم خادمها) ليختار المستخدم التي
+                // تعمل بصورة صحيحة لديه. (ترجمة vidaraa قد تكون مشوّهة الترميز في مصدرها،
+                // بينما ترجمة Rumble نظيفة؛ التمييز بالاسم يتيح الاختيار الصحيح.)
                 resolved.forEachIndexed { idx, srv ->
-                    val useClean = (idx == 0 && cleanSubs != null) || srv.subtitles.isEmpty()
-                    val finalSubs = if (useClean && cleanSubs != null) cleanSubs else srv.subtitles
-                    val emit = if (finalSubs.isEmpty()) srv else srv.copy(subtitles = finalSubs)
-                    emitServer(emit, idx == 0, subtitleCallback, callback)
+                    emitServer(srv, idx == 0, subtitleCallback, callback)
                 }
             }
             true
