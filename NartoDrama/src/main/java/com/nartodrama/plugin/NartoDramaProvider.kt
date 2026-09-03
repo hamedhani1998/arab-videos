@@ -110,12 +110,13 @@ class NartoDramaProvider : MainAPI() {
         return null
     }
 
-    // Curated seed queries mirroring the native Narto home: a generic feed, the all-dubbed
-    // مدبلج feed, and a general drama feed. The empty query returns the default browse list.
+    // Browse = default feed + a dedicated dubbed tab. edge's /search responses are LARGE (300–450 KB)
+    // and SLOW (2.5–3.7s measured even on a desktop), so a multi-tab home (3+ big searches) was the
+    // "التصفح ثقيل" problem. The empty query (q='') returns the site's default feed in ONE request
+    // (fast); the مدبلج tab is the value the user wants. Full search is available in the app too.
     override val mainPage = mainPageOf(
-        "ق" to "الأحدث والمقترحة",
+        "" to "الأحدث والمقترحة",
         "مدبلج" to "مسلسلات مدبلجة 🎙️",
-        "دراما" to "دراما",
     )
 
     // The video-serve origin we must present to the edge/stream endpoints.
@@ -131,20 +132,15 @@ class NartoDramaProvider : MainAPI() {
     // Detect whether a stream URL is an HLS playlist (M3U8) or a direct single video file (MP4).
     // Narto serves BOTH from different backends, and CloudStream must get the right link type or
     // it will refuse/garble playback (an MP4 handed as M3U8 -> parse error, the "doesn't play" bug).
-    private suspend fun inferStreamType(url: String): ExtractorLinkType {
+    // NOTE: purely URL-based — NO network HEAD probe. Probing each link (some hosts are dead/slow)
+    // was the "التشغيل بطيء" delay; classifying from the URL is instant.
+    private fun inferStreamType(url: String): ExtractorLinkType {
         val lower = url.lowercase()
-        if (lower.contains("mime_type=video_mp4") || lower.endsWith(".mp4")) return ExtractorLinkType.VIDEO
-        if (lower.contains(".m3u8") || lower.contains("/e/m/") || lower.contains("/e/s/")
-            || lower.contains("/main.m3u8")) return ExtractorLinkType.M3U8
-        // Ambiguous (e.g. token-style montagehub URLs with no extension) -> probe Content-Type.
-        return try {
-            val r = app.head(url, headers = mapOf("User-Agent" to UA), referer = nartoOrigin)
-            val ct = r.headers["Content-Type"]?.lowercase() ?: ""
-            if (ct.contains("mpegurl") || ct.contains("hls") || ct.contains("apple")) ExtractorLinkType.M3U8
-            else ExtractorLinkType.VIDEO
-        } catch (e: Exception) {
-            ExtractorLinkType.M3U8
-        }
+        if (lower.contains("mime_type=video_mp4") || lower.endsWith(".mp4") || lower.endsWith(".m4v"))
+            return ExtractorLinkType.VIDEO
+        // M3U8 is the dominant container across narto's backends (shortmax/-stream, proxy /e/m/,
+        // akamai) — ambiguous token URLs default to HLS rather than block on a network probe.
+        return ExtractorLinkType.M3U8
     }
 
     // ---- Parse the ListItem JSON array embedded in a /search HTML page ----
@@ -177,10 +173,12 @@ class NartoDramaProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val t0 = System.currentTimeMillis()
         return try {
             val q = request.data.replace(" ", "+")
             val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
-            android.util.Log.e("NartoDrama", "getMainPage q=$q len=${html.length} item=" + html.contains("\"@type\":\"ListItem\""))
+            val t1 = System.currentTimeMillis()
+            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${t1 - t0} len=${html.length} item=" + html.contains("\"@type\":\"ListItem\""))
             val items = parseSearchItems(html)
             if (items.isEmpty()) return null
             val list = items.mapNotNull { it.toSearchResponse() }
@@ -214,9 +212,11 @@ class NartoDramaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        val t0 = System.currentTimeMillis()
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
             val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin).document
+            android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0}")
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
@@ -323,7 +323,10 @@ class NartoDramaProvider : MainAPI() {
 
             suspend fun emit(u: String, label: String, q: String) {
                 if (u.isBlank() || !emitted.add(u)) return
+                val t0 = System.currentTimeMillis()
                 val type = inferStreamType(u)
+                val ts = System.currentTimeMillis() - t0
+                if (ts > 500) android.util.Log.e("NartoDrama", "emit slow $label typeMs=$ts $u")
                 callback(
                     newExtractorLink(source = name, name = label, url = u, type = type) {
                         referer = nartoOrigin
