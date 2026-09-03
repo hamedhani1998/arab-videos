@@ -63,6 +63,11 @@ private data class EdgeSub(
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
+// Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
+// playback links — the player would select them and fail (saw "UnknownHostException:
+// sulao.montagehub.xyz" on device; nslookup via dns.google confirms the domain is gone).
+private val DEAD_HOST_PATTERNS = listOf("montagehub")
+
 // ---- SINGLE domain (NO mirror merging) ----
 // edge.narto-drama.com is the ONE open backend (no Cloudflare) that serves the native Arabic
 // catalog. Previous versions auto-failed-over between edge and the Cloudflare-protected
@@ -315,9 +320,18 @@ class NartoDramaProvider : MainAPI() {
             // We emit EVERY distinct URL with its correct container type so the right link plays.
             val emitted = LinkedHashSet<String>()
             var any = false
+            var skippedDead = 0
 
             suspend fun emit(u: String, label: String, q: String) {
                 if (u.isBlank() || !emitted.add(u)) return
+                // Skip playback links from DEAD backend hosts (DNS NODATA) — emitting them just
+                // makes the player pick a host that doesn't resolve and fail playback.
+                val host = u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
+                if (DEAD_HOST_PATTERNS.any { host.contains(it) }) {
+                    skippedDead++
+                    android.util.Log.e("NartoDrama", "emit SKIP dead host $host ($label)")
+                    return
+                }
                 val type = inferStreamType(u)
                 callback(
                     newExtractorLink(source = name, name = label, url = u, type = type) {
@@ -377,7 +391,7 @@ class NartoDramaProvider : MainAPI() {
             //    "صوت منفصل" link and NO separate "صوت:" group links — the player's native audio-track
             //    switcher lists every audio (ar-SA / stream_1 / ...) when the chosen master is played.
 
-            android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} any=$any")
+            android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
             any
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "loadLinks FATAL", e)
