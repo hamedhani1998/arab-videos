@@ -2,17 +2,17 @@
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/Drama4All.cs3",
     "status": 1,
-    "version": 2,
+    "version": 3,
     "name": "Drama4All",
     "internalName": "Drama4All",
     "authors": ["hamedhani1998"],
     "description": "دراما للجميع - مسلسلات وأفلام مترجمة",
-    "fileSize": 23831,
+    "fileSize": 25401,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-278f9d98151e17eadef1e4123464517209c59073cec9a6da3bd061faff2f163b"
+    "fileHash": "sha256-1a1d34492786eba640788b0779b096ba60eb8ad4f0fab1701215b5cebca44574"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoDrama.cs3",

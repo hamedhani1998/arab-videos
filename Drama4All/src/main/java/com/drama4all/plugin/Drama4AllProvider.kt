@@ -221,30 +221,46 @@ class Drama4AllProvider : MainAPI() {
             val item = signedEpisode(slug, ep) ?: return false
             val vUrl = item.videoUrl ?: return false
 
-            // 1) كل الترجمات/القرائن
+            // 1) كل الترجمات حسب اللغة — نُرسل كل لغة مرة واحدة فقط.
+            //    API يعطي تسميات لغة جاهزة (مثل "بالعربية" / "English" / "ar") وقد يُكرّر نفس الرابط
+            //    (مِثل ملفي .vtt عربيين متطابقين في sf_ أو نفس .srt عبر لغات). نستبعد التكرار بالرابط
+            //    ثم نتجاهل تكرار نفس اللغة لنفس الحلقة.
+            val seenSub = HashSet<String>()
+            val seenLang = HashSet<String>()
             item.subs?.forEach { s ->
-                val lang = s.lang ?: return@forEach
-                val subUrl = s.url ?: return@forEach
-                if (subUrl.isNotBlank()) {
-                    try {
-                        subtitleCallback(newSubtitleFile(lang, subUrl))
-                    } catch (e: Exception) {}
+                val lang = s.lang?.trim() ?: return@forEach
+                val subUrl = s.url?.trim() ?: return@forEach
+                if (subUrl.isEmpty() || !seenSub.add(subUrl)) return@forEach
+                if (lang.isEmpty()) { // رابط بلا تسمية لغة -> نمرّره مرة واحدة
+                    try { subtitleCallback(newSubtitleFile("ترجمة", subUrl)) } catch (e: Exception) {}
+                    return@forEach
                 }
+                if (!seenLang.add(lang)) return@forEach // نفس اللغة مكررة -> مرة واحدة
+                try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
             }
 
-            // 2) الرابط: video_url على drama4all هو ملف مباشر (Cloudflare R2 .mp4 غالباً) — نكشف النوع
-            //    حسب الامتداد (مثل Narto inferStreamType) بدل افتراض M3U8 دائماً.
+            // 2) الجودة الحقيقية من مسار الرابط: nsstorage يبني المسار على هيئة /{lang}/{N}p/{hash}/...
+            //    (مثال /ar_SA/1080p/) — نستخرجها بدل افتراض 480p افتراضياً. إن لم نجد الجزء بقي الافتراضي.
+            val qualityFromPath: (String) -> String = { url ->
+                val m = Regex("""/(\d{3,4})p/""").find(url)
+                m?.groupValues?.get(1)?.let { "${it}p" }
+                    ?: url.let { u ->
+                        when {
+                            u.contains("1080") -> "1080p"
+                            u.contains("720") -> "720p"
+                            u.contains("480") -> "480p"
+                            else -> "480p"
+                        }
+                    }
+            }
+
             val isMp4 = vUrl.lowercase().contains(".mp4") || vUrl.lowercase().contains(".m4v")
                 || vUrl.lowercase().contains("mime_type=video_mp4")
             if (isMp4) {
-                val q = when {
-                    vUrl.contains("1080") -> "1080p"
-                    vUrl.contains("720") -> "720p"
-                    vUrl.contains("480") -> "480p"
-                    else -> "480p"
-                }
+                // nt_ family: ملف مباشر واحد (R2 .mp4) — الجودة هي الوحيدة المتوفرة من المصدر
+                val q = qualityFromPath(vUrl)
                 callback(
-                    newExtractorLink(source = name, name = q, url = vUrl, type = ExtractorLinkType.VIDEO) {
+                    newExtractorLink(source = name, name = "ملف كامل ($q)", url = vUrl, type = ExtractorLinkType.VIDEO) {
                         referer = mainUrl
                         quality = getQualityFromName(q)
                         headers = mapOf("Referer" to mainUrl)
@@ -254,19 +270,17 @@ class Drama4AllProvider : MainAPI() {
                 // HLS: master (جودات متعددة) أم ملف media واحد؟
                 val streamText = try { app.get(vUrl, referer = mainUrl).text } catch (e: Exception) { "" }
                 if (streamText.contains("#EXT-X-STREAM-INF")) {
+                    // master كامل — يشمل كل الجودات المتوفرة، المشغّل يختارها
                     callback(
-                        newExtractorLink(source = name, name = "Full HD (كل الجودات)", url = vUrl, type = ExtractorLinkType.M3U8) {
+                        newExtractorLink(source = name, name = "كل الجودات (متغير)", url = vUrl, type = ExtractorLinkType.M3U8) {
                             referer = mainUrl
                             quality = getQualityFromName("1080p")
                             headers = mapOf("Referer" to mainUrl)
                         }
                     )
                 } else {
-                    val q = when {
-                        vUrl.contains("720") -> "720p"
-                        vUrl.contains("480") -> "480p"
-                        else -> "480p"
-                    }
+                    // ملف media واحد — الجودة الحقيقية موجودة في المسار (sf_ family: single 1080p)
+                    val q = qualityFromPath(vUrl)
                     callback(
                         newExtractorLink(source = name, name = q, url = vUrl, type = ExtractorLinkType.M3U8) {
                             referer = mainUrl
