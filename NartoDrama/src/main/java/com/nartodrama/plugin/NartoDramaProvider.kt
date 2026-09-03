@@ -86,24 +86,26 @@ class NartoDramaProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
-    // True if an HTTP result is a Cloudflare/bot interstitial rather than real content.
-    private fun isCfChallenge(status: Int, body: String): Boolean {
-        if (status == 403 || status == 503) return true
+    // True if a body looks like a Cloudflare/bot interstitial rather than real content.
+    // NOTE: detection is on the BODY only — a 200/HTTP status alone is not trustworthy from the
+    // CloudStream client, so we never branch on `Response.code` (which isn't available anyway).
+    private fun isCfChallenge(body: String): Boolean {
         val head = body.take(4000)
         return CF_HINTS.any { head.contains(it, ignoreCase = true) }
     }
 
     // Run `fetch` against each mirror (mainUrl override first, then the rest) and return the first
-    // response that is NOT a Cloudflare challenge, together with the mirror base that served it. If
-    // every mirror is challenged, return null so callers can fail gracefully.
-    private suspend fun tryMirrors(fetch: suspend (String) -> Pair<Int, String>): Pair<String, Pair<Int, String>>? {
+    // body that is NOT a Cloudflare challenge, together with the mirror base that served it. If any
+    // mirror throws on fetch, try the next; if every mirror is challenged/empty, return null.
+    private suspend fun tryMirrors(fetch: suspend (String) -> String?): Pair<String, String>? {
         val order = buildList {
             add(mainUrl)
             for (m in NARTO_MIRRORS) if (m != mainUrl) add(m)
         }
         for (base in order) {
-            val r = try { fetch(base) } catch (e: Exception) { null } ?: continue
-            if (!isCfChallenge(r.first, r.second)) return base to r
+            val body = try { fetch(base) } catch (e: Exception) { null }
+            if (body.isNullOrBlank()) continue
+            if (!isCfChallenge(body)) return base to body
         }
         return null
     }
@@ -177,11 +179,10 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val q = request.data.replace(" ", "+")
-            val (base, res) = tryMirrors { b ->
-                val r = app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin)
-                r.code to r.text
+            val (base, body) = tryMirrors { b ->
+                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
             } ?: return null
-            val items = parseSearchItems(res.second)
+            val items = parseSearchItems(body)
             if (items.isEmpty()) return null
             val list = items.mapNotNull { it.toSearchResponse(base) }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
@@ -193,11 +194,10 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val (base, res) = tryMirrors { b ->
-                val r = app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin)
-                r.code to r.text
+            val (base, body) = tryMirrors { b ->
+                app.get("$b/search?lang=ar-SA&q=$q", referer = nartoOrigin).text
             } ?: return null
-            val items = parseSearchItems(res.second)
+            val items = parseSearchItems(body)
             items.mapNotNull { it.toSearchResponse(base) }
         } catch (e: Exception) {
             null
@@ -218,12 +218,11 @@ class NartoDramaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
-            val (base, res) = tryMirrors { b ->
-                val r = app.get("$b/detail/watch/$slug", referer = nartoOrigin)
-                r.code to r.text
+            val (base, body) = tryMirrors { b ->
+                app.get("$b/detail/watch/$slug", referer = nartoOrigin).text
             } ?: return null
 
-            val doc = org.jsoup.Jsoup.parse(res.second)
+            val doc = org.jsoup.Jsoup.parse(body)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
@@ -255,11 +254,10 @@ class NartoDramaProvider : MainAPI() {
     // Fetch the narto edge refresh-source payload for a canonical slug+episode.
     private suspend fun edgeRefreshSource(slug: String, ep: String): EdgeResponse? {
         return try {
-            val mirror = tryMirrors { b: String ->
-                val r = app.get("$b/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin)
-                r.code to r.text
+            val (_, body) = tryMirrors { b: String ->
+                app.get("$b/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
             } ?: return null
-            mapper.readValue(mirror.second.second, EdgeResponse::class.java)
+            mapper.readValue(body, EdgeResponse::class.java)
         } catch (e: Exception) {
             null
         }
