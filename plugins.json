@@ -469,7 +469,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 17,
+  "version": 1,
   "internalName": "NartoDrama",
   "description": "Narto Drama - مسلسلات دراما مترجمة",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/NartoDrama.cs3",
@@ -589,7 +589,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 7,
+  "version": 1,
   "internalName": "OnShort",
   "description": "OnShort - مسلسلات دراما قصيرة (عربي)",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/OnShort.cs3",
@@ -609,7 +609,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 11,
+  "version": 1,
   "internalName": "DeepDrama",
   "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/DeepDrama.cs3",
@@ -648,7 +648,7 @@
   "tvTypes": [
    "TvSeries"
   ],
-  "version": 9,
+  "version": 1,
   "internalName": "MinuteDrama",
   "description": "MinuteDrama - مسلسلات دراما قصيرة إنجليزية",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/MinuteDrama.cs3",
