@@ -216,7 +216,7 @@ class NartoDramaProvider : MainAPI() {
             val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
             val description = doc.selectFirst("meta[name=description]")?.attr("content")
 
-            val eps = doc.select("div.episode-list a.episode-item")
+            var eps = doc.select("div.episode-list a.episode-item")
                 .mapNotNull { el ->
                     val href = el.attr("href") ?: return@mapNotNull null
                     val ep = Regex("""/detail/watch/[^/]+/(\d+)""").find(href)?.groupValues?.get(1)
@@ -226,6 +226,21 @@ class NartoDramaProvider : MainAPI() {
                         name = "الحلقة $ep"
                     }
                 }
+
+            // Some works render their episode list client-side (JS) — especially single-"full episode"
+            // properties rendered as one entry with no static a.episode-item anchors (e.g.
+            // "نادي القلوب المكسورة: رومانسي كوميدي" showed eps=0). For those, the refresh-source API
+            // still serves ep=1 with a playable source + all subtitles, so emit a single ep=1 rather
+            // than an empty detail the player can't act on. (Multi-episode works keep their real list.)
+            if (eps.isEmpty()) {
+                android.util.Log.e("NartoDrama", "load slug=$slug no static episodes -> fallback single ep=1")
+                eps = listOf(
+                    newEpisode("$mainUrl/detail/watch/$slug/1") {
+                        episode = 1
+                        name = "الحلقة"
+                    }
+                )
+            }
 
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, eps) {
                 posterUrl = poster
