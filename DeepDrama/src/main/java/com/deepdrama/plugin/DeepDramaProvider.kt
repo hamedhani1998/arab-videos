@@ -146,24 +146,6 @@ class DeepDramaProvider : MainAPI() {
         return null
     }
 
-    /** يحلل الجودات من master Rumble (روابط مطلقة hugh.cdn تستغني عن Rumble r_file). */
-    private fun parseRumbleMaster(master: String): List<ServerRendition> {
-        val out = mutableListOf<ServerRendition>()
-        val lines = master.lines()
-        for (i in 0 until lines.size - 1) {
-            val inf = lines[i].trim()
-            if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
-            val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull()
-                ?: continue
-            val bw = Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-            val url = lines[i + 1].trim()
-            if (url.startsWith("http")) {
-                out.add(ServerRendition(url, height, bw))
-            }
-        }
-        return out.distinctBy { it.url }
-    }
-
     /** يجلب روابط Rumble (مخزّنة) — مرة واحدة ثم يُعاد استخدامها. */
     private suspend fun resolveRumble(embedUrl: String): ServerResolved {
         resolveCache["rumble:$embedUrl"]?.let { return it }
@@ -192,17 +174,15 @@ class DeepDramaProvider : MainAPI() {
             // مصفوفة [] = لا ترجمة؛ نتجاهل.
         }
 
-        // جودات Rumble: نسأل الـ master التكيفي نفسه (يُبثّ كما هو، بروابطه المطلقة).
-        val renditions = if (hls != null) {
-            try { parseRumbleMaster(app.get(hls, headers = headers(), referer = embedUrl).text) }
-            catch (_: Exception) { emptyList() }
-        } else emptyList()
-
+        // جودات Rumble: لا نجلب الـ master هنا (درس v2/v3 — النافذة ضيقة وRumble
+        // بطيء). نصدّر الـ master التكيفي نفسه فقط، فيتولى المشغّل التكيّف بين
+        // الجودات تلقائيًا. (المعلومات الكاملة في التعليق أعلى: الخادم يقدّم
+        // جودات متعددة داخل الـ master الواحد.)
         // ملاحظة: لا نستخدم timeline.mp4 (180x320 معاينة) بأي حال — ليس بالفيلم الكامل.
         val resolved = ServerResolved(
             name = "Rumble",
             hls = hls,
-            renditions = renditions,
+            renditions = emptyList(),  // الجودات داخل الـ master نفسه؛ لا فكّ هنا.
             subtitles = subs,
             directVideo = null,  // لا ملف mp4 كامل مباشر عند Rumble — الصحيح هو الـ HLS.
         )
@@ -441,17 +421,16 @@ class DeepDramaProvider : MainAPI() {
                 if (size == 0) add(primary.substringBefore("?"))
             }.joinToString("|||")
 
-            // نُسخّن ذاكرة التخزين للخادم الأساسي فقط أثناء عرض التفاصيل حتى يكون أول
-            // تشغيل فورياً: vidaraa حلّه سريع (~0.5s) فيُفضَّل؛ وإن كان الأساسي Rumble
-            // (فيديو بلا vidaraa) نُسخّنه لأن التشغيل سيبدأ به. لا نُسخّن الخادم
-            // الثاني (البديل) هنا لأنه أبطأ ويحجب ظهورَ التفاصيل؛ يُحلّ عند حاجته
-            // في loadLinks. بهذا تظهر صفحة التفاصيل سريعة ولا يتأخر أول تشغيل.
-            val warmNormalized = (if (vidaraa != null) vidaraa else rumble) ?: primary
-            when {
-                warmNormalized.contains("vidaraa") ->
-                    try { resolveVidaraa(warmNormalized.substringBefore("?")) } catch (_: Exception) {}
-                warmNormalized.contains("rumble") ->
-                    try { resolveRumble(warmNormalized.substringBefore("?")) } catch (_: Exception) {}
+            // نُسخّن ذاكرة التخزين للخادم الأساسي (vidaraa = الأسرع) أثناء عرض التفاصيل
+            // حتى يكون أول تشغيل فوريًا. Rumble يُسخَّن عند الحاجة في loadLinks
+            // (resolveRumble الآن لا يجلب الـ master — قراءة embed سريعة فقط).
+            // درس سابق (v2/v3): لا نجلب master Rumble داخل loadLinks فلا يتأخر
+            // التشغيل ولا تنكسر الشاشة.
+            (vidaraa ?: rumble ?: primary).substringBefore("?").takeIf { it.isNotBlank() }?.let { warm ->
+                try {
+                    if (warm.contains("vidaraa")) resolveVidaraa(warm)
+                    else if (warm.contains("rumble")) resolveRumble(warm)
+                } catch (_: Exception) { /* تجاهل — يُعاد عند الحاجة في loadLinks */ }
             }
 
             val episode = newEpisode(bundle) {
