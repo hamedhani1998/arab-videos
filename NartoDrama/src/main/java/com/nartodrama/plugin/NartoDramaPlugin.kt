@@ -6,9 +6,9 @@ import com.lagradost.cloudstream3.plugins.Plugin
 @CloudstreamPlugin
 class NartoDramaPlugin : Plugin() {
     override fun load() {
-        // Two Narto sources requested by the user: the open edge mirror (browsing) and the main
-        // domain (fast playback refresh). Both are MainAPI providers in the same dex.
-        registerMainAPI(NartoEdgeProvider())
-        registerMainAPI(NartoMainProvider())
+        // Standalone "Narto Drama" extension — pinned to https://narto-drama.com only.
+        // Fully separate from the "Edge Narto Drama" extension (own module, own cache, own
+        // refresh channel, own cooldown handling) so the two never interfere or merge.
+        registerMainAPI(NartoDramaProvider())
     }
 }

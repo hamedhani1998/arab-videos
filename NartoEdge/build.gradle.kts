@@ -1,11 +1,11 @@
 android {
-    namespace = "com.nartodrama.plugin"
+    namespace = "com.nartoedge.plugin"
 }
 
-version = 30
+version = 1
 
 cloudstream {
-    description = "Narto Drama - مسلسلات دراما مترجمة"
+    description = "Edge Narto Drama - مسلسلات دراما مترجمة"
     authors = listOf("hamedhani1998")
     status = 1
     tvTypes = listOf("TvSeries", "Movie")

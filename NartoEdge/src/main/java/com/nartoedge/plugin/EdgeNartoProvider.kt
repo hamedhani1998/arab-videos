@@ -1,4 +1,4 @@
-package com.nartodrama.plugin
+package com.nartoedge.plugin
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
@@ -12,11 +12,11 @@ private val mapper = ObjectMapper().registerKotlinModule()
 
 private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-// Standalone "Narto Drama" extension — pinned to https://narto-drama.com ONLY.
-// Build from scratch (v1) as one concrete class; 100% independent from the separate
-// "Edge Narto Drama" extension (own module, own cache, own refresh channel, own cooldown
-// handling). No shared base class with the other source.
-private const val NARTO_HOST = "https://narto-drama.com"
+// Standalone "Edge Narto Drama" extension — pinned to https://edge.narto-drama.com ONLY.
+// This provider is 100% independent: its own cache, its own refresh channel, its own cooldown
+// handling — it never talks to main.narto-drama.com (that belongs to the separate "Narto Drama"
+// extension). Kept as one concrete class; no shared base with the other source.
+private const val EDGE_HOST = "https://edge.narto-drama.com"
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
@@ -26,46 +26,46 @@ private val DEAD_HOST_PATTERNS = listOf("montagehub")
 // One JSON-LD ListItem entry from the search results page.
 private data class SearchHit(
     @JsonProperty("@type") val type: String? = null,
-    val url: String? = null,    // https://narto-drama.com/detail/watch/{slug}?lang=...
+    val url: String? = null,    // https://edge.narto-drama.com/detail/watch/{slug}?lang=...
     val name: String? = null,   // Arabic title (e.g. "[مدبلج] ...")
     val image: String? = null,  // /assets/poster/{id}.jpg
 )
 
-// Narto playback API — Narto aggregates short-drama from MANY backends (shortmax, NetShort,
-// StardustTV, mydramawave, ...). Each work's direct_play_url/play_url/multi_resolutions may
-// be an HLS playlist OR a direct MP4 file — so loadLinks detects the container per link.
-private data class NartoResponse(
+// Narto edge playback API — Narto aggregates short-drama from MANY backends (shortmax, NetShort,
+// StardustTV, mydramawave, ...). Each work's direct_play_url/play_url/multi_resolutions may be
+// an HLS playlist OR a direct MP4 file — so loadLinks detects the container per link.
+private data class EdgeResponse(
     val ok: Boolean? = null,
     val message: String? = null,
     val canonical: String? = null,          // full canonical URL hint on slug_mismatch
     @JsonProperty("retry_after_seconds") val retryAfterSeconds: Int? = null, // 429 cooldown
     @JsonProperty("direct_play_url") val directPlayUrl: String? = null,
     @JsonProperty("play_url") val playUrl: String? = null,
-    @JsonProperty("multi_resolutions") val multiResolutions: List<NartoResolution>? = null,
-    @JsonProperty("multi_subtitles") val multiSubtitles: List<NartoSub>? = null,
+    @JsonProperty("multi_resolutions") val multiResolutions: List<EdgeResolution>? = null,
+    @JsonProperty("multi_subtitles") val multiSubtitles: List<EdgeSub>? = null,
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,
     @JsonProperty("direct_subtitle_url") val directSubtitleUrl: String? = null,
     @JsonProperty("selected_subtitle_language") val selectedSubtitleLanguage: String? = null,
 )
 
-private data class NartoResolution(
+private data class EdgeResolution(
     val resolution: Int? = null,
     val label: String? = null,
     @JsonProperty("stream_url") val streamUrl: String? = null,
 )
 
-private data class NartoSub(
+private data class EdgeSub(
     @JsonProperty("language_code") val languageCode: String? = null,
     val label: String? = null,
     @JsonProperty("subtitle_url") val subtitleUrl: String? = null,     // relative /e/s/{jwt}
 )
 
-// Minimal fake JWT the API accepts (claims are not verified, slug/ep read from path).
+// Minimal fake JWT the edge accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
 
-class NartoDramaProvider : MainAPI() {
-    override var name = "Narto Drama"
-    override var mainUrl = NARTO_HOST
+class EdgeNartoProvider : MainAPI() {
+    override var name = "Edge Narto Drama"
+    override var mainUrl = EDGE_HOST
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
@@ -80,8 +80,9 @@ class NartoDramaProvider : MainAPI() {
         "أكشن" to "⚔️ أكشن",
     )
 
-    // Referer for all requests/links. This is just an HTTP Referer header the narto stream/
-    // subtitle servers expect; it does NOT merge this source with the Edge extension.
+    // Referer for all requests/links — the main domain. This is the ONLY "shared" value and it's
+    // just an HTTP Referer header the narto stream/subtitle servers expect; it does NOT merge the
+    // two sources (each still browses and fetches playback from its OWN pinned domain above).
     private val nartoOrigin = "https://narto-drama.com"
 
     // Per-tab in-memory cache so re-entering / tab-hopping serves the list instantly instead of
@@ -133,7 +134,7 @@ class NartoDramaProvider : MainAPI() {
                 return html
             }
         } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "search fetch error", e)
+            android.util.Log.e("EdgeNarto", "search fetch error", e)
         }
         return null
     }
@@ -144,16 +145,16 @@ class NartoDramaProvider : MainAPI() {
             val q = request.data.trim()
             val html = fetchSearch(q)
             if (html == null) {
-                android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
+                android.util.Log.e("EdgeNarto", "getMainPage fetch failed q=$q")
                 return null
             }
-            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length}")
+            android.util.Log.e("EdgeNarto", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length}")
             val items = parseSearchItems(html)
             if (items.isEmpty()) return null
             val list = items.take(12).mapNotNull { it.toSearchResponse() }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "getMainPage ERROR", e)
+            android.util.Log.e("EdgeNarto", "getMainPage ERROR", e)
             null
         }
     }
@@ -164,7 +165,7 @@ class NartoDramaProvider : MainAPI() {
             if (html == null) return null
             parseSearchItems(html).mapNotNull { it.toSearchResponse() }
         } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "search ERROR q=$query", e)
+            android.util.Log.e("EdgeNarto", "search ERROR q=$query", e)
             null
         }
     }
@@ -192,14 +193,14 @@ class NartoDramaProvider : MainAPI() {
                 try {
                     doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 20000L).document
                 } catch (e: Exception) {
-                    android.util.Log.e("NartoDrama", "load attempt=$attempt/3 slug=$slug error=${e.message?.take(80)}", e)
+                    android.util.Log.e("EdgeNarto", "load attempt=$attempt/3 slug=$slug error=${e.message?.take(80)}", e)
                     if (attempt < 3) {
                         try { Thread.sleep(1500) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
                     }
                 }
             }
             if (doc == null) return null
-            android.util.Log.e("NartoDrama", "load slug=$slug host=$loadHost fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
+            android.util.Log.e("EdgeNarto", "load slug=$slug host=$loadHost fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
@@ -219,7 +220,7 @@ class NartoDramaProvider : MainAPI() {
                 }
 
             if (eps.isEmpty()) {
-                android.util.Log.e("NartoDrama", "load slug=$slug no static episodes -> fallback single ep=1")
+                android.util.Log.e("EdgeNarto", "load slug=$slug no static episodes -> fallback single ep=1")
                 eps = listOf(
                     newEpisode("$loadHost/detail/watch/$slug/1") {
                         episode = 1
@@ -237,9 +238,9 @@ class NartoDramaProvider : MainAPI() {
         }
     }
 
-    // Fetch the refresh-source payload for this provider's OWN host only (narto-drama.com).
-    // Per-episode cooldown handling: retryable gate that we wait out (bounded) then retry.
-    private suspend fun fetchRefresh(slug: String, ep: String): NartoResponse? {
+    // Fetch the refresh-source payload for this provider's OWN host only (edge). v23 cooldown
+    // handling: retryable per-episode gate that we wait out (bounded) then retry.
+    private suspend fun fetchRefresh(slug: String, ep: String): EdgeResponse? {
         var waited = false
         var attempt = 0
         while (attempt < 2) {
@@ -250,21 +251,21 @@ class NartoDramaProvider : MainAPI() {
                     referer = nartoOrigin,
                     timeout = 60000L
                 ).text
-                val edge = mapper.readValue(body, NartoResponse::class.java)
+                val edge = mapper.readValue(body, EdgeResponse::class.java)
                 if (edge.ok != true && (edge.message == "refresh_source_recently_failed" || edge.message == "refresh_source_cooldown_active")) {
                     if (waited) {
-                        android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN persists slug=$slug ep=$ep retryAfter=${edge.retryAfterSeconds}")
+                        android.util.Log.e("EdgeNarto", "fetchRefresh COOLDOWN persists slug=$slug ep=$ep retryAfter=${edge.retryAfterSeconds}")
                         return null
                     }
                     waited = true
                     val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 12)) * 1000L
-                    android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
+                    android.util.Log.e("EdgeNarto", "fetchRefresh COOLDOWN slug=$slug ep=$ep waiting=${waitMs}ms")
                     try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
                     continue
                 }
                 return edge
             } catch (e: Exception) {
-                android.util.Log.e("NartoDrama", "fetchRefresh ERROR attempt=$attempt/2 slug=$slug ep=$ep", e)
+                android.util.Log.e("EdgeNarto", "fetchRefresh ERROR attempt=$attempt/2 slug=$slug ep=$ep", e)
                 if (attempt < 2) {
                     try { Thread.sleep(800) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
                 }
@@ -288,7 +289,7 @@ class NartoDramaProvider : MainAPI() {
 
             var edge = fetchRefresh(slug, ep)
             if (edge == null) {
-                android.util.Log.e("NartoDrama", "loadLinks NO EDGE slug=$slug ep=$ep")
+                android.util.Log.e("EdgeNarto", "loadLinks NO EDGE slug=$slug ep=$ep")
                 return false
             }
 
@@ -302,14 +303,14 @@ class NartoDramaProvider : MainAPI() {
             if (edge.ok != true && edge.message == "slug_mismatch") {
                 val canon = edge.canonical?.let { Regex("""/detail/watch/([^/?]+)/""").find(it)?.groupValues?.get(1) }
                 if (canon != null && canon != slug) {
-                    android.util.Log.e("NartoDrama", "loadLinks slug_mismatch $slug -> $canon ep=$ep")
+                    android.util.Log.e("EdgeNarto", "loadLinks slug_mismatch $slug -> $canon ep=$ep")
                     slug = canon
                     edge = fetchRefresh(slug, ep)
                     if (edge == null) return false
                 }
             }
             if (edge.ok != true) {
-                android.util.Log.e("NartoDrama", "loadLinks edge.ok!=true (continuing anyway) slug=$slug ep=$ep msg=${edge.message} play=${edge.directPlayUrl?.take(60)} res=${edge.multiResolutions?.size}")
+                android.util.Log.e("EdgeNarto", "loadLinks edge.ok!=true (continuing anyway) slug=$slug ep=$ep msg=${edge.message} play=${edge.directPlayUrl?.take(60)} res=${edge.multiResolutions?.size}")
             }
 
             // 1) subtitles — every track the API returns (multi_subtitles + any single track).
@@ -342,7 +343,7 @@ class NartoDramaProvider : MainAPI() {
                 val host = u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
                 if (DEAD_HOST_PATTERNS.any { host.contains(it) }) {
                     skippedDead++
-                    android.util.Log.e("NartoDrama", "emit SKIP dead host $host ($label)")
+                    android.util.Log.e("EdgeNarto", "emit SKIP dead host $host ($label)")
                     return
                 }
                 val type = inferStreamType(u)
@@ -404,13 +405,13 @@ class NartoDramaProvider : MainAPI() {
 
             if (emitted.isEmpty()) {
                 for ((u, label, q) in liveOnes) emit(u, label, q)
-                android.util.Log.e("NartoDrama", "loadLinks only refresh multi-res available, surfacing anyway slug=$slug")
+                android.util.Log.e("EdgeNarto", "loadLinks only refresh multi-res available, surfacing anyway slug=$slug")
             }
 
-            android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
+            android.util.Log.e("EdgeNarto", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
             any
         } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "loadLinks FATAL", e)
+            android.util.Log.e("EdgeNarto", "loadLinks FATAL", e)
             false
         }
     }
