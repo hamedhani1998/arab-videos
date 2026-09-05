@@ -187,15 +187,15 @@ class NartoDramaProvider : MainAPI() {
                 ?.let { "https://$it" } ?: mainUrl
             var doc: org.jsoup.nodes.Document? = null
             var attempt = 0
-            while (attempt < 3 && doc == null) {
+            // v31 (perf): no retry-sleep punishment. The detail page is server-bound: the HTML
+            // build takes 12-19s on slow slugs, so a generous first timeout gets a real 200 —
+            // extra sleeps on failure only ADD perceived delay. One instant re-probe, then give up.
+            while (attempt < 2 && doc == null) {
                 attempt++
                 try {
-                    doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 20000L).document
+                    doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 30000L).document
                 } catch (e: Exception) {
-                    android.util.Log.e("NartoDrama", "load attempt=$attempt/3 slug=$slug error=${e.message?.take(80)}", e)
-                    if (attempt < 3) {
-                        try { Thread.sleep(1500) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
-                    }
+                    android.util.Log.e("NartoDrama", "load attempt=$attempt/2 slug=$slug error=${e.message?.take(80)}", e)
                 }
             }
             if (doc == null) return null
