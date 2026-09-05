@@ -79,25 +79,19 @@ private const val STREAM_HOST = "https://stream.narto-drama.com"
 // sulao.montagehub.xyz" on device; nslookup via dns.google confirms the domain is gone).
 private val DEAD_HOST_PATTERNS = listOf("montagehub")
 
-// ---- SINGLE domain (NO mirror merging) ----
-// edge.narto-drama.com is the ONE open backend (no Cloudflare) that serves the native Arabic
-// catalog. Previous versions auto-failed-over between edge and the Cloudflare-protected
-// narto-drama.com via tryMirrors — that MERGING of two domains is what broke the interface
-// display on device. Now EVERY request uses ONLY this single mainUrl. To point the source at
-// another link, clone it in CloudStream and edit the URL (the native "choose this link or that"
-// mechanism) — no code-side merging.
-class NartoDramaProvider : MainAPI() {
+// ---- SINGLE domain per provider (NO mirror merging) ----
+// The plugin ships TWO Narto sources: "edge narto drama" (open edge mirror, DEFAULT for browsing)
+// and "https://narto-drama.com" (main domain, FAST for playback refresh). Each provider class
+// is a MainAPI with its own name + mainUrl. They share ALL logic via NartoBaseProvider.
+// Previous versions auto-failed-over between the two via tryMirrors — that MERGING is what broke
+// the interface display on device (v8–v11 lesson, fixed by v12 single-domain).
+open class NartoBaseProvider : MainAPI() {
     override var name = "Narto Drama"
-    // MANUAL DOMAIN OPTION (no auto-failover — keeps browsing fast and never breaks the UI).
-    // `mainUrl` is an open override var, so the user can switch mirrors from CloudStream's native
-    // "Clone + edit URL" (the site's changing-link mechanism). Default stays on the FAST, OPEN
-    // mirror edge.narto-drama.com (direct IP, no Cloudflare). The alternative mirror
-    // narto-drama.com is Cloudflare-protected (~10s responses) — it would slow browse/search and
-    // re-break the interface if auto-merged (the v8–v11 lesson that v12 fixed by going single-domain).
-    // Swap happens MANUALLY and only if the user wants to try the other host:
-    //   - https://edge.narto-drama.com     (DEFAULT — open, fast, no CF)
-    //   - https://narto-drama.com          (manual alternative — Cloudflare, slower)
-    override var mainUrl = "https://edge.narto-drama.com"
+    // Default mainUrl (edge) is open & fast for browsing. The MAIN domain is used only for the
+    // playback refresh-source fetch (fetchRefresh specificity below) because edge's own
+    // refresh-source became slow (12-41s) while main answers in ~1s with no Cloudflare on that
+    // API route.
+    open override var mainUrl = "https://edge.narto-drama.com"
     override var lang = "ar"
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
@@ -321,11 +315,12 @@ class NartoDramaProvider : MainAPI() {
     }
 
     private suspend fun loadRefresh(slug: String, ep: String): EdgeResponse? {
-        // MAIN first (fast ~1s, reliable payload), edge second as a slow-but-working fallback.
-        val main = fetchRefresh(slug, ep, MAIN_HOST)
-        if (main != null) return main
-        android.util.Log.e("NartoDrama", "fetchRefresh main dead -> edge fallback slug=$slug ep=$ep")
-        return fetchRefresh(slug, ep, mainUrl)
+        // Try this provider's OWN mainUrl first (each source knows its fast host), then the other.
+        val self = fetchRefresh(slug, ep, mainUrl)
+        if (self != null) return self
+        val other = if (mainUrl.contains("edge")) MAIN_HOST else "https://edge.narto-drama.com"
+        android.util.Log.e("NartoDrama", "fetchRefresh $mainUrl dead -> fallback $other slug=$slug ep=$ep")
+        return fetchRefresh(slug, ep, other)
     }
 
     override suspend fun loadLinks(
@@ -461,6 +456,39 @@ class NartoDramaProvider : MainAPI() {
                 } catch (e: Exception) { false }
             }
 
+            // ---- Reconstruct ALL qualities from the play_url JWT ----
+            // The stream-e1 /e/m/{jwt} proxy is single-quality (_480), and the multi_resolutions
+            // tokens from this API are already-expired 410s. BUT the JWT payload's `src` field
+            // points at the real signed CDN master (e.g. https://volcengine-forward.shorttv.live/
+            // hls/{id}_480/main.m3u8?auth_key=...) whose auth_key is quality-agnostic — verified
+            // LIVE that {id}_480, {id}_720 AND {id}_1080 all return a working HLS (200, with
+            // real deliverable segments). So we rebuild a fresh quality set from src+auth_key.
+            fun allQualities(u: String?): List<Triple<String, String, String>> {
+                // url, label, quality
+                val seg = u ?: return emptyList()
+                return try {
+                    val jwt = seg.substringAfter("/e/m/").substringBefore("?")
+                    val parts = jwt.split(".")
+                    if (parts.size < 2) return emptyList()
+                    val b64 = parts[0].filter { it != '=' }
+                    val pad = "=".repeat((4 - b64.length % 4) % 4)
+                    val raw = java.util.Base64.getUrlDecoder().decode(b64 + pad)
+                    val map = mapper.readValue(String(raw, Charsets.UTF_8), Map::class.java)
+                    val src = map["src"] as? String ?: return emptyList()
+                    // src = https://{cdn}/hls/{id}_480/main.m3u8?auth_key=...
+                    val m = Regex("""https://[^/]+(/.+?)_\d{3,4}(/main\.m3u8\?auth_key=[^"]*)""").find(src) ?: return emptyList()
+                    val cdn = Regex("""https://([^/]+)/""").find(src)?.groupValues?.get(1) ?: return emptyList()
+                    val out = mutableListOf<Triple<String, String, String>>()
+                    // Prefer the top quality first so the player picks the best.
+                    for ((suffix, label) in listOf("_1080" to "1080p", "_720" to "720p", "_480" to "480p")) {
+                        out.add(Triple("https://$cdn${m.groupValues[1]}$suffix${m.groupValues[2]}", label, label))
+                    }
+                    out
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
+
             // Group the per-quality token links, dedupe by URL (one master may back several labels).
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
@@ -515,18 +543,22 @@ class NartoDramaProvider : MainAPI() {
             }
             val proxyQ = proxyQuality(edge.directPlayUrl)
 
-            // Emit order = what the user asked: the WORKING multi-quality links FIRST, then the
-            // local proxies (كامل / رابط مباشر) as a safe fallback for when all token links died.
+            // Emit order = what the user asked: the WORKING multi-quality links FIRST. The
+            // RECONSTRUCTED 3-quality set (1080/720/480 from the JWT src+auth_key — the same real
+            // CDN masters the site's player uses) is the primary source, then the working
+            // multi-res tokens, then the local proxy (كامل/رابط مباشر) as fallback.
             // Dead 410/403 tokens are NOT emitted (they'd just be dead first taps).
-            for ((u, label, q) in liveOnes) emit(u, label, q)
+            val rebuilt = allQualities(edge.directPlayUrl)
+            for ((u, label, q) in rebuilt) emit(u, label, q)
+            for ((u, label, q) in liveOnes.filter { t -> rebuilt.none { it.first == t.first } }) emit(u, label, q)
             var first = true
             for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
                 emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
                 first = false
             }
-            // Last resort only: if every quality is dead AND there's no proxy, still surface the
-            // multi-res links so the user can try a manually-refreshed token.
-            if (liveOnes.isEmpty() && edge.playUrl.isNullOrBlank() && edge.directPlayUrl.isNullOrBlank()) {
+            // Last resort only: if every quality is dead AND there's no rebuilt set AND no proxy, still
+            // surface the multi-res links so the user can try a manually-refreshed token.
+            if (rebuilt.isEmpty() && liveOnes.isEmpty() && edge.playUrl.isNullOrBlank() && edge.directPlayUrl.isNullOrBlank()) {
                 for ((u, label, q) in deadOnes) emit(u, label, q)
                 android.util.Log.e("NartoDrama", "loadLinks only dead multi-res available (all 410/403), surfacing anyway slug=$slug")
             } else if (deadOnes.isNotEmpty()) {
@@ -547,4 +579,23 @@ class NartoDramaProvider : MainAPI() {
             false
         }
     }
+}
+
+// ---- The two Narto sources the user asked for ----
+//   1) "edge narto drama" — the open (no-CF) mirror, DEFAULT for browsing the native Arabic catalog.
+//   2) "https://narto-drama.com" — the main domain, the reliable host for playback refresh.
+// Both are separate MainAPI providers registered from NartoDramaPlugin.load(); both share the
+// logic in NartoBaseProvider. Each keeps a fixed mainUrl — no auto-failover between them.
+class NartoEdgeProvider(
+    initialMainUrl: String = "https://edge.narto-drama.com"
+) : NartoBaseProvider() {
+    override var name = "edge narto drama"
+    override var mainUrl = initialMainUrl
+}
+
+class NartoMainProvider(
+    initialMainUrl: String = "https://narto-drama.com"
+) : NartoBaseProvider() {
+    override var name = "https://narto-drama.com"
+    override var mainUrl = initialMainUrl
 }
