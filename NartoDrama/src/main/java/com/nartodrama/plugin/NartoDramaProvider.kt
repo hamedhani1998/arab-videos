@@ -357,6 +357,70 @@ open class NartoBaseProvider : MainAPI() {
         return fetchRefresh(slug, ep, mainUrl)
     }
 
+    // v24: For SHORTMAX works, refresh-source's play/direct links are dead on arrival
+    // (shortmax-stream.narto-drama.com/{token} -> 410 "link expired"), but the SITE still plays
+    // them via the player page /detail/watch/{slug}/{ep} -> `episodeItemsRaw` -> entry.direct_play_url,
+    // whose jwt src is the real akamai CDN master
+    // (akamai-static.shorttv.live/hls/{uuid}_{480}/main.m3u8?auth_key=...). That auth_key is
+    // quality-agnostic — _480/_720/_1080 all serve a real HLS (200 + segments, verified live).
+    // This helper fetches the player page, finds the current episode's direct_play_url jwt, decodes
+    // its src, and rebuilds the 3 real quality URLs — the SAME path the site uses to play.
+    private suspend fun siteAkamaiLinks(slug: String, ep: String): List<Triple<String, String, String>> {
+        return try {
+            val body = app.get(
+                "$mainUrl/detail/watch/$slug/$ep",
+                referer = nartoOrigin,
+                headers = mapOf("User-Agent" to UA),
+                timeout = 25000L
+            ).text
+            // Find `const episodeItemsRaw = [...]` then parse the array (it may contain escaped \/).
+            val marker = "episodeItemsRaw"
+            val idx = body.indexOf(marker)
+            if (idx < 0) return emptyList()
+            val arrStart = body.indexOf('[', idx)
+            if (arrStart < 0) return emptyList()
+            var depth = 0
+            var arrEnd = -1
+            for (k in arrStart until body.length) {
+                when (body[k]) {
+                    '[' -> depth++
+                    ']' -> { depth--; if (depth == 0) { arrEnd = k; break } }
+                }
+            }
+            if (arrEnd < 0) return emptyList()
+            val arrJson = body.substring(arrStart, arrEnd + 1).replace("\\/", "/")
+            val arr = mapper.readValue(arrJson, List::class.java)
+            // Find the entry for this episode (route_episode_number / number == ep) — fall back to first.
+            val entry = (arr as? List<*>)?.mapNotNull { it as? Map<*, *> }
+                ?.firstOrNull { it["route_episode_number"]?.toString() == ep || it["number"]?.toString() == ep }
+                ?: (arr as? List<*>)?.mapNotNull { it as? Map<*, *> }?.firstOrNull()
+                ?: return emptyList()
+            val du = entry["direct_play_url"] as? String ?: return emptyList()
+            // Same JWT decode as allQualities: extract the src.
+            val jwt = du.substringAfter("/e/m/", "").substringBefore("?")
+            if (jwt.isEmpty()) return emptyList()
+            val parts = jwt.split(".")
+            if (parts.size < 2) return emptyList()
+            val b64 = parts[0].filter { it != '=' }
+            val pad = "=".repeat((4 - b64.length % 4) % 4)
+            val raw = java.util.Base64.getUrlDecoder().decode(b64 + pad)
+            val map = mapper.readValue(String(raw, Charsets.UTF_8), Map::class.java)
+            val src = map["src"] as? String ?: return emptyList()
+            // src = https://akamai-static.shorttv.live/hls/{uuid}_{480}/main.m3u8?auth_key=...
+            val m = Regex("""https://[^/]+(/.+?)_\d{3,4}(/main\.m3u8\?auth_key=[^"]*)""").find(src) ?: return emptyList()
+            val cdn = Regex("""https://([^/]+)/""").find(src)?.groupValues?.get(1) ?: return emptyList()
+            val out = mutableListOf<Triple<String, String, String>>()
+            for ((suffix, label) in listOf("_1080" to "1080p", "_720" to "720p", "_480" to "480p")) {
+                out.add(Triple("https://$cdn${m.groupValues[1]}$suffix${m.groupValues[2]}", label, label))
+            }
+            // Referer is required by the akamai host — set on the emitted link below.
+            out
+        } catch (e: Exception) {
+            android.util.Log.e("NartoDrama", "siteAkamaiLinks ERROR slug=$slug ep=$ep", e)
+            emptyList()
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -591,6 +655,32 @@ open class NartoBaseProvider : MainAPI() {
             // multi-res tokens, then the local proxy (كامل/رابط مباشر) as fallback.
             // Dead 410/403 tokens are NOT emitted (they'd just be dead first taps).
             val rebuilt = allQualities(edge.directPlayUrl)
+            // v24: for SHORTMAX works the refresh-source play/direct links point at
+            // shortmax-stream.narto-drama.com/{token} — those are EXPIRED (410, "link expired") on
+            // arrival, so they fail on device while the SAME work plays on the site. The site's
+            // player feeds from /detail/watch/{slug}/{ep} -> episodeItemsRaw[i].direct_play_url,
+            // whose jwt src is the REAL akamai CDN master (akamai-static.shorttv.live/hls/{uuid}_
+            // {480}/main.m3u8?auth_key=...) with a quality-agnostic auth_key (verified 200 + real
+            // segments for _480/_720/_1080). That is the playback path that actually works, so for
+            // shortmax works we extract those akamai links from the player page and lead with them.
+            if (rebuilt.isEmpty()) {
+                val ak = siteAkamaiLinks(slug, ep)
+                if (ak.isNotEmpty()) {
+                    android.util.Log.e("NartoDrama", "loadLinks shortmax akamai-links=${ak.size} slug=$slug ep=$ep")
+                    for ((u, label, q) in ak) emit(u, label, q)
+                    // The akamai set IS the working source — skip emitting the dead proxy below.
+                    // Still allow fallback links if the user taps one after a failed stream.
+                    for ((u, label, q) in liveOnes.filter { t -> ak.none { it.first == t.first } }) emit(u, label, q)
+                    var first = true
+                    for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
+                        emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
+                        first = false
+                    }
+                    if (emitted.isEmpty()) return false
+                    android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} any=$any")
+                    return any
+                }
+            }
             for ((u, label, q) in rebuilt) emit(u, label, q)
             for ((u, label, q) in liveOnes.filter { t -> rebuilt.none { it.first == t.first } }) emit(u, label, q)
             var first = true
@@ -638,6 +728,6 @@ class NartoEdgeProvider(
 class NartoMainProvider(
     initialMainUrl: String = "https://narto-drama.com"
 ) : NartoBaseProvider() {
-    override var name = "narto drama"
+    override var name = "Narto Drama"
     override var mainUrl = initialMainUrl
 }
