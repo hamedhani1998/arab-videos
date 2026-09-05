@@ -355,9 +355,17 @@ class NartoDramaProvider : MainAPI() {
             }
 
             // 2) the video — Narto aggregates from many backends, so a work can carry:
-            //      a) multi_resolutions -> the per-resolution stream_url set (1080/720/480)
-            //      b) a single play_url / direct_play_url (HLS master/media, or a direct MP4 file)
-            // We emit EVERY distinct URL with its correct container type so the right link plays.
+            //      a) a single play_url / direct_play_url (HLS master/media, or a direct MP4 file)
+            //      b) multi_resolutions -> the per-resolution stream_url set (1080/720/480)
+            // The RELIABLE links are the narto-LOCAL proxy URLs (play_url / direct_play_url — the
+            // stream-e1 /e/m/{jwt} or cdn.narto-drama.com MP4 proxies the site's own player uses).
+            // The multi_resolutions URLs are direct backend token links (shortmax-stream, hakuna,
+            // netshort...) whose signed tokens expire in MINUTES — by the time the user taps play
+            // they return HTTP 410 (verified live on 2 dubbed slugs: ALL 3 stream_urls are 410
+            // while play+direct are 200). So they MUST NOT be the first thing the player selects.
+            // Strategy (matches "نفس الموقع"): emit the working proxy links FIRST as the primary
+            // source, then offer multi_resolutions only as labeled fallbacks. If every proxy fails
+            // the user can still try a fresh multi_resolutions token — one that was just refreshed.
             val emitted = LinkedHashSet<String>()
             var any = false
             var skippedDead = 0
@@ -383,13 +391,38 @@ class NartoDramaProvider : MainAPI() {
                 any = true
             }
 
-            // multi_resolutions first — the full per-quality URL set.
+            // True resolution of the stream-e1 proxy URI, decoded from the JWT src field it wraps.
+            // A signed URL keeps its quality as a `_1080/_720/_480` folder under .m3u8 — so the
+            // label can show the REAL quality instead of a made-up "1080p" (the whole episode is
+            // often a single 480p master — pretending higher causes a "no such quality" tap).
+            fun proxyQuality(u: String?): String {
+                val s = u ?: return "480p"
+                val seg = s.trim().trimEnd('=').substringAfterLast('.')
+                val dec = try {
+                    java.net.URLDecoder.decode(seg, "UTF-8")
+                } catch (e: Exception) { seg }
+                val q = Regex("""_(\d{3,4})p""").find(dec)?.groupValues?.get(1)
+                return if (q == null) "480p" else "${q}p"
+            }
+            val proxyQ = proxyQuality(edge.directPlayUrl)
+
+            // PRIMARY links FIRST — the narto-local proxies the site actually plays.
+            // play_url (كامل) and direct_play_url (رابط مباشر) are usually the same signed proxy;
+            // dedupe by URL so the list doesn't show two copies of one working link, and preserve
+            // the play-first / direct-second naming when they DO differ.
+            var first = true
+            for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
+                emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
+                first = false
+            }
+
+            // FALLBACK links — the per-quality backend tokens. Dedupe by URL (one master may back
+            // several labels) and surface each distinct source as ONE link so the list isn't 3
+            // copies. These may be expired (the site's own player hits this too) but a freshly
+            // refreshed token sometimes works, and a fetched master is still honest HLS.
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
             if (resolutions.isNotEmpty()) {
-                // Several "resolutions" often share ONE master/proxy URL — group by actual URL so
-                // we don't emit the same link 3 times, then surface each distinct source as its own
-                // playable quality (this is the "more than one link" the user wants to see).
                 val byUrl = linkedMapOf<String, MutableList<String>>()
                 for (r in resolutions) {
                     val u = r.streamUrl!!
@@ -407,21 +440,6 @@ class NartoDramaProvider : MainAPI() {
                     }
                     emit(u, label, q)
                 }
-            }
-
-            // ALWAYS also surface play_url + direct_play_url (deduped against the URLs above).
-            // Rationale: the per-quality multi_resolutions URLs are often short-lived signed token
-            // links (shortmax-stream, hakuna, montagehub, netshort...) that are already expired or
-            // dead by the time the user taps play — but direct_play_url is the reliable narto-local
-            // proxy (stream-e1 /e/m or cdn.narto-drama.com MP4). Emitting them as fallbacks means a
-            // work still plays even when every multi_resolutions token has lapsed. This is the fix
-            // for "المسلسل يعرض حلقات ولا تشتغل": multi_res empty-but-dead no longer hides the good link.
-            // Each survives as its OWN distinctly-named link so the list never shows two confusing
-// same-named entries (user: "تفصل كل رابط باضافه منفصله"). play -> كامل, direct -> رابط مباشر.
-            var first = true
-            for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl)) {
-                emit(u, if (first) "كامل" else "رابط مباشر", "1080p")
-                first = false
             }
 
             // 3) MULTI-AUDIO as TRACKS, not links. The user wants the site's multiple audio tracks to
