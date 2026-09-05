@@ -384,122 +384,6 @@ open class NartoBaseProvider : MainAPI() {
         return fetchRefresh(slug, ep, mainUrl)
     }
 
-    // v25: The SITE's own player feeds from /detail/watch/{slug}/{ep} -> `episodeItemsRaw`, which is
-    // the ONLY place that carries EVERY quality you see on the site FOR THE CURRENT EPISODE:
-    //   - direct_play_url   = the LIVE source the site actually plays (stream-e1.narto-drama.com
-    //                          /e/m/{jwt} -> its src is the signed shortmax-stream token that returns
-    //                          200 + real HLS segments — verified live; NOT the dead stale token that
-    //                          refresh-source returns).
-    //   - multi_resolutions = the labelled per-quality set (1080p/720p/480p for shortmax, 1080p/720p
-    //                          for moboreels) — the SAME list the site's quality selector shows.
-    // refresh-source, by contrast, returns stale/expired tokens (410) and multi_resolutions=0, which is
-    // why only ONE quality showed. So v25 reads the player page and emits ALL of the site's qualities.
-    // v26: the player page also carries the FULL subtitle & audio set (multi_subtitles,
-    // direct_subtitle_url, direct_audio_url) which refresh-source sometimes omits — collect it too so
-    // nothing the site offers is dropped.
-    private data class EpisodeItemData(
-        val liveDu: String?,
-        val qualities: List<Triple<String, String, String>>, // url, label, quality
-        val subs: List<Pair<String, String>>,   // lang -> resolved URL
-        val audio: List<Pair<String, String>>,  // lang -> resolved URL
-    )
-
-    private suspend fun episodeItemLinks(slug: String, ep: String, pageBase: String): EpisodeItemData {
-        val empty = EpisodeItemData(null, emptyList(), emptyList(), emptyList())
-        return try {
-            // Player page is stable on the MAIN host (~200, ~1MB). Intermittent 502 (edge upstream)
-            // — retry with a short backoff like load() does so a bad-gateway doesn't blank qualities.
-            var body: String? = null
-            var attempt = 0
-            while (attempt < 3 && body == null) {
-                attempt++
-                try {
-                    body = app.get(
-                        "$pageBase/detail/watch/$slug/$ep",
-                        referer = nartoOrigin,
-                        headers = mapOf("User-Agent" to UA),
-                        timeout = 30000L
-                    ).text
-                } catch (e: Exception) {
-                    if (attempt < 3) {
-                        try { Thread.sleep(1200) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
-                    }
-                }
-            }
-            if (body == null) { android.util.Log.e("NartoDrama", "episodeItemLinks page failed slug=$slug ep=$ep"); return empty }
-            val marker = "episodeItemsRaw"
-            val idx = body.indexOf(marker)
-            if (idx < 0) return empty
-            val arrStart = body.indexOf('[', idx)
-            if (arrStart < 0) return empty
-            // Balance braces/[ ] respecting strings so escaped \/ and nested quotes don't break it.
-            var depth = 0
-            var arrEnd = -1
-            var inStr = false
-            for (k in arrStart until body.length) {
-                val c = body[k]
-                if (inStr) {
-                    if (c == '\\') continue
-                    if (c == '"') inStr = false
-                } else when (c) {
-                    '"' -> inStr = true
-                    '[' -> depth++
-                    ']' -> { depth--; if (depth == 0) { arrEnd = k; break } }
-                }
-            }
-            if (arrEnd < 0) return empty
-            val arrJson = body.substring(arrStart, arrEnd + 1).replace("\\/", "/")
-            val arr = mapper.readValue(arrJson, List::class.java)
-            val entries = (arr as? List<*>)?.mapNotNull { it as? Map<*, *> } ?: return empty
-            val entry = entries.firstOrNull { it["route_episode_number"]?.toString() == ep || it["number"]?.toString() == ep }
-                ?: entries.firstOrNull()
-                ?: return empty
-
-            // 1) the LIVE play URL (stream-e1/e/m/{jwt} whose src is a real signed master).
-            var liveDu: String? = null
-            val du = entry["direct_play_url"] as? String
-            if (!du.isNullOrBlank() && du.contains("/e/m/")) liveDu = du
-
-            // 2) every labelled quality straight from multi_resolutions (exactly what the site shows).
-            val out = mutableListOf<Triple<String, String, String>>()
-            val mrs = entry["multi_resolutions"] as? List<*>
-            for (mr in mrs.orEmpty()) {
-                val m = mr as? Map<*, *> ?: continue
-                val url = m["stream_url"] as? String ?: continue
-                if (url.isBlank()) continue
-                val label = m["label"] as? String
-                val res = m["resolution"]?.toString()
-                val q = when (res) { "1080" -> "1080p"; "720" -> "720p"; "540" -> "540p"; else -> (label ?: res ?: "480p") }
-                if (out.none { it.first == url }) out.add(Triple(url, label ?: q, q))
-            }
-            // 3) EVERY subtitle/dub the page offers (multi_subtitles + direct_subtitle_url +
-            //    direct_audio_url) — resolve relative /e/s/{jwt} & /e/a/{jwt} against stream host.
-            val subs = mutableListOf<Pair<String, String>>()
-            val audio = mutableListOf<Pair<String, String>>()
-            (entry["multi_subtitles"] as? List<*>)?.forEach { ms ->
-                val mm = ms as? Map<*, *> ?: return@forEach
-                val url = mm["subtitle_url"] as? String ?: return@forEach
-                if (url.isBlank()) return@forEach
-                val lang = (mm["label"] as? String)?.takeIf { it.isNotBlank() }
-                    ?: (mm["language_code"] as? String)?.takeIf { it.isNotBlank() }
-                    ?: "ترجمة"
-                subs.add(lang to (if (url.startsWith("http")) url else STREAM_HOST + url))
-            }
-            val dSub = entry["direct_subtitle_url"] as? String
-            if (!dSub.isNullOrBlank() && !dSub.contains("undefined"))
-                subs.add("ترجمة مباشرة" to (if (dSub.startsWith("http")) dSub else STREAM_HOST + dSub))
-            val dAud = entry["direct_audio_url"] as? String
-            if (!dAud.isNullOrBlank() && !dAud.contains("undefined"))
-                audio.add("صوت" to (if (dAud.startsWith("http")) dAud else STREAM_HOST + dAud))
-
-            android.util.Log.e("NartoDrama", "episodeItemLinks slug=$slug ep=$ep liveDu=${liveDu?.isNotBlank() == true} mrs=${out.size} subs=${subs.size} aud=${audio.size}")
-            EpisodeItemData(liveDu, out, subs, audio)
-        } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "episodeItemLinks ERROR slug=$slug ep=$ep", e)
-            empty
-        }
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -507,8 +391,8 @@ open class NartoBaseProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            // data = $loadHost/detail/watch/{slug}/{ep} — derive the host the user opened so the player page
-            // fetch (episodeItemLinks) and any emitted links stay on that same host's route.
+            // data = $loadHost/detail/watch/{slug}/{ep} — derive the host the user opened so any emitted
+            // links / refresh calls stay on that same host's route.
             val m = Regex("""/detail/watch/([^/?]+)/(\d+)""").find(data) ?: return false
             val ep = m.groupValues[2]
             var slug = m.groupValues[1]
@@ -615,47 +499,10 @@ open class NartoBaseProvider : MainAPI() {
                 any = true
             }
 
-            // v25: removed the per-token liveness probe (2.5-3.5s delay, and tokens often 403/410
-            // anyway). The player page's quality list is authoritative and its direct_play_url is the
-            // live source; probing was the "جودات بطيئة" delay.
-
-            // ---- Reconstruct ALL qualities from the play_url JWT ----
-            // The stream-e1 /e/m/{jwt} proxy is single-quality (_480), and the multi_resolutions
-            // tokens from this API are already-expired 410s. BUT the JWT payload's `src` field
-            // points at the real signed CDN master (e.g. https://volcengine-forward.shorttv.live/
-            // hls/{id}_480/main.m3u8?auth_key=...) whose auth_key is quality-agnostic — verified
-            // LIVE that {id}_480, {id}_720 AND {id}_1080 all return a working HLS (200, with
-            // real deliverable segments). So we rebuild a fresh quality set from src+auth_key.
-            fun allQualities(u: String?): List<Triple<String, String, String>> {
-                // url, label, quality
-                val seg = u ?: return emptyList()
-                return try {
-                    val jwt = seg.substringAfter("/e/m/").substringBefore("?")
-                    val parts = jwt.split(".")
-                    if (parts.size < 2) return emptyList()
-                    val b64 = parts[0].filter { it != '=' }
-                    val pad = "=".repeat((4 - b64.length % 4) % 4)
-                    val raw = java.util.Base64.getUrlDecoder().decode(b64 + pad)
-                    val map = mapper.readValue(String(raw, Charsets.UTF_8), Map::class.java)
-                    val src = map["src"] as? String ?: return emptyList()
-                    // src = https://{cdn}/hls/{id}_480/main.m3u8?auth_key=...
-                    val m = Regex("""https://[^/]+(/.+?)_\d{3,4}(/main\.m3u8\?auth_key=[^"]*)""").find(src) ?: return emptyList()
-                    val cdn = Regex("""https://([^/]+)/""").find(src)?.groupValues?.get(1) ?: return emptyList()
-                    val out = mutableListOf<Triple<String, String, String>>()
-                    // Prefer the top quality first so the player picks the best.
-                    for ((suffix, label) in listOf("_1080" to "1080p", "_720" to "720p", "_480" to "480p")) {
-                        out.add(Triple("https://$cdn${m.groupValues[1]}$suffix${m.groupValues[2]}", label, label))
-                    }
-                    out
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            }
-
-            // v25: NO network probing here. The player page (episodeItemLinks) already gives us the
-            // SITE's per-quality list with their real URLs — probing each token (2.5-3.5s, and tokens
-            // often 403/410 anyway) was the "يتاخر بعرض الجودات" delay. We keep a lightweight,
-            // non-probing fallback set from refresh's multi_resolutions for when the page fetch fails.
+            // v26: NO network probing and NO heavy player-page fetch here (those were the "يتاخر
+            // بعرض الفيديو" delays — a ~1-6s page pull on every tap). Everything we emit comes from
+            // refresh-source's already-fetched multi_resolutions (+ proxies), so links appear instantly.
+            // Build the labelled fallback set from refresh's multi_resolutions (non-probing).
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
             val liveOnes = mutableListOf<Triple<String, String, String>>() // url, label, quality
@@ -692,68 +539,49 @@ open class NartoBaseProvider : MainAPI() {
             }
             val proxyQ = proxyQuality(edge.directPlayUrl)
 
-            // v26 emit order (matches what the user verified PLAYING on device): the site's real
-            // quality set from the player page — multi_resolutions FIRST as the DEFAULT (1080p/720p/
-            // 480p; user-confirmed these play on device), then the live "كامل" direct_play_url as a
-            // fallback. In v25 the live du was emitted FIRST and Source-errored on device while the
-            // multi-res links played — hence the swap. multi_resolutions tokens can expire minutes
-            // after the page fetch (exactly like on the site), so the live du fallback sits behind.
-            // The player page fetch is the ONLY slow-ish step (~1-6s) — required to match the site's
-            // qualities. It runs on every episode tap; no probing delay is added.
-            val page = episodeItemLinks(slug, ep, loadHost)
-
-            // 1) DEFAULT — EVERY labelled quality the site's selector shows (multi_resolutions).
-            for ((u, label, q) in page.qualities) emit(u, label, q)
-
-            // 2) The LIVE direct_play_url (stream-e1/e/m/{jwt} — the exact source the site's player
-            //    runs, fresh at fetch time) as the fallback behind the device-verified qualities.
-            if (page.liveDu != null) {
-                emit(page.liveDu, "كامل", proxyQ)
+            // v26 LATEST (per device logcat): emitting the 3 SEPARATE shortmax-stream tokens
+            // (1080p/720p/480p) is wrong — they are three independent signed URLs that expire to
+            // HTTP 410 minutes after fetch, so the player picks the first, plays a moment, then
+            // Source-errors ("جودة واحدة اشتغلت"). The user asked for ONE combined multi-quality
+            // link with the qualities switchable INSIDE the player. The fix:
+            //   * Emit ONE master only — the highest-quality multi_resolutions stream_url — as a
+            //     single "جودة متعددة" link. If that master is a real multi-rendition HLS, ExoPlayer
+            //     shows the in-player quality switcher for 1080p/720p/480p; if it's a single-quality
+            //     master, at least it plays without the 410 Source-error.
+            //   * Skip the ~1-6s full player-page fetch here (it was the "يتاخر بعرض الفيديو" delay
+            //     AND its tokens were the expired ones). multi_resolutions from the refresh source —
+            //     which this episode's chosen quality already uses — is available instantly.
+            val mres = edge.multiResolutions.orEmpty().filter { !it.streamUrl.isNullOrBlank() }
+            // Prefer the highest resolution present, else first listed.
+            val best = mres.maxByOrNull { (it.resolution ?: 0) } ?: mres.firstOrNull()
+            val masterUrl = best?.streamUrl
+            if (!masterUrl.isNullOrBlank()) {
+                val labels = mres.filter { it.streamUrl == masterUrl }.mapNotNull { it.label }
+                val label = if (labels.isEmpty()) "جودة متعددة" else "جودة متعددة · " + labels.joinToString("/")
+                emit(masterUrl, label, "1080p")
             }
 
-            // 3) Merge the player page's OWN subtitle set (multi_subtitles + direct_subtitle_url) —
-            //    the page sometimes lists tracks refresh-source misses ("ملفات الترجمة بالكامل").
-            //    lang -> URL is already resolved; dedupe against refresh's seenSubs by URL.
-            for ((lang, rel) in page.subs) {
-                val subUrl = if (rel.startsWith("http")) rel else STREAM_HOST + rel
-                if (!seenSubs.add(subUrl)) continue
-                try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
+            // Fallback: the live direct_play_url (stream-e1/e/m/{jwt}) — fresh at fetch time, single
+            // quality — plus the refresh proxies, deduped, so there's always a tap target.
+            var first = true
+            for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
+                emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
+                first = false
             }
 
-            // Fallback: the refresh-source proxy links (in case the page fetch failed), deduped.
-            if (page.qualities.isEmpty() && page.liveDu == null) {
-                val rebuilt = allQualities(edge.directPlayUrl)
-                for ((u, label, q) in rebuilt) emit(u, label, q)
-                for ((u, label, q) in liveOnes) emit(u, label, q)
-                var first = true
-                for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
-                    emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
-                    first = false
-                }
-            } else {
-                // Also keep a single "رابط مباشر" refresh proxy as a manual fallback for when the
-                // primary token expires before the user taps (fresh refresh-source token may serve).
-                var first = true
-                for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
-                    emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
-                    first = false
-                }
-            }
-            // Last resort: if the player page offered nothing AND refresh had no proxy, surface
-            // the refresh multi-res links raw so the user can at least try a fresh token.
-            if (emitted.isEmpty() && liveOnes.isEmpty() && edge.playUrl.isNullOrBlank() && edge.directPlayUrl.isNullOrBlank()) {
+            // If even the master and proxies yielded nothing, surface whatever multi-res is left.
+            if (emitted.isEmpty()) {
                 for ((u, label, q) in liveOnes) emit(u, label, q)
                 android.util.Log.e("NartoDrama", "loadLinks only refresh multi-res available, surfacing anyway slug=$slug")
             }
 
-            // 3) AUDIO via TRACKS, not links (the user asked for an audio switcher "مثل الترجمة" and
-            //    explicitly rejected any standalone audio that plays without video). The video links
-            //    above ARE the HLS masters; when a master carries #EXT-X-MEDIA:TYPE=AUDIO groups,
-            //    ExoPlayer populates the native audio-track switcher (مسارات الصوت) — picking a
-            //    language there keeps the video rolling, exactly what the user wants. That is the ONLY
-            //    correct path here: probing this backend (shortmax) shows no separate audio — the
-            //    tracks live inside the master. So we emit NO standalone "صوت منفصل" link and NO
-            //    "صوت:" group link; the player's audio selector lists them when the chosen master plays.
+            // Subtitles & audio: the refresh source already supplied the full subtitle set above
+            // (seenSubs). We deliberately do NOT fetch the heavy player page on every tap anymore
+            // (that was the playback delay) — refresh's multi_subtitles/subtitle_url/direct_subtitle_url
+            // cover the full track set for recent works. Audio travels INSIDE the HLS master (no
+            // standalone audio link — the user explicitly rejected "صوت بدون فيديو"); when a master
+            // carries #EXT-X-MEDIA:TYPE=AUDIO groups, ExoPlayer's native audio switcher (مسارات الصوت)
+            // lists every language while the video keeps playing. So we emit no "صوت منفصل"/"صوت:" links.
 
             android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
             any
