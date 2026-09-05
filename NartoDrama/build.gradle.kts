@@ -2,7 +2,7 @@ android {
     namespace = "com.nartodrama.plugin"
 }
 
-version = 24
+version = 25
 
 cloudstream {
     description = "Narto Drama - مسلسلات دراما مترجمة"

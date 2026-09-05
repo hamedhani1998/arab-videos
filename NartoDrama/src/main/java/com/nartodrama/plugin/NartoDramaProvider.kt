@@ -98,19 +98,18 @@ open class NartoBaseProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
 
     // Main screen = one section per tab, each a distinct Arabic query (verified live: different
-// queries return DIFFERENT 24-item feeds, 0 overlap — so these are real categories, not the
+// queries return DIFFERENT feeds, 0 overlap — so these are real categories, not the
 // same list repackaged). The empty query (q='') is the site's "recommendations" feed but it
 // intermittently returns HTTP 502 from edge, so it is NOT used. Each tab lazily fetches ONE
-// query only when opened (keeps browsing light — one ~400KB fetch per section).
+// query only when opened. v25: capped to the 4 most useful tabs and each list to 12 items so the
+// first paint is light (the search HTML is ~440KB — fetching 8 tabs & 24 items each made the
+// home screen feel slow). The search itself prefers MAIN_HOST (measured faster than edge for
+// keyword feeds: ~1-4s vs ~3-24s).
     override val mainPage = mainPageOf(
         "دراما" to "🎬 دراما",
         "مدبلج" to "🎙️ مدبلج",
         "رومانسي" to "💕 رومانسي",
         "أكشن" to "⚔️ أكشن",
-        "كوميدي" to "😄 كوميدي",
-        "جريمة" to "🕵️ جريمة",
-        "تركي" to "🇹🇷 تركي",
-        "كوري" to "🇰🇷 كوري",
     )
 
     // The video-serve origin we must present to the edge/stream endpoints.
@@ -168,20 +167,41 @@ open class NartoBaseProvider : MainAPI() {
         }
     }
 
+    // v25: fetch a /search page. Prefer MAIN_HOST for keyword feeds (measured faster for this
+    // route), falling back to this provider's own mainUrl if MAIN_HOST fails — so a 502 or a
+    // slow edge upstream never blanks the home screen.
+    private suspend fun fetchSearch(q: String): String? {
+        val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
+        val hosts = if (mainUrl == MAIN_HOST) listOf(MAIN_HOST) else listOf(MAIN_HOST, mainUrl)
+        for (h in hosts) {
+            try {
+                val html = app.get("$h/search?lang=ar-SA&q=$urlEncQ", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
+                if (html.contains("\"@type\":\"ListItem\"")) {
+                    searchBase = h
+                    return html
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("NartoDrama", "search fetch $h error", e)
+            }
+        }
+        return null
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        // Browse hits the OPEN mirror (edge) DIRECTLY — NOT through tryMirrors. The CF-protected
-        // narto-drama.com fallback in tryMirrors made the whole page come back EMPTY on device when
-        // edge was slow/blank (the fallback then also got challenged -> null). This exact direct form
-        // is what showed the main page reliably in v6/v7. request.data is the tab's query string.
+        // request.data is the tab's query string. v25: capped list to 12 so first paint is light
+        // (the /search HTML is ~440KB; a full 24-item grid isn't needed for the home rows).
         val t0 = System.currentTimeMillis()
         return try {
             val q = request.data.trim()
-            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
-            val t1 = System.currentTimeMillis()
-            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${t1 - t0} len=${html.length} item=" + html.contains("\"@type\":\"ListItem\""))
+            val html = fetchSearch(q)
+            if (html == null) {
+                android.util.Log.e("NartoDrama", "getMainPage fetch failed q=$q")
+                return null
+            }
+            android.util.Log.e("NartoDrama", "getMainPage q=$q fetchMs=${System.currentTimeMillis() - t0} len=${html.length}")
             val items = parseSearchItems(html)
             if (items.isEmpty()) return null
-            val list = items.mapNotNull { it.toSearchResponse() }
+            val list = items.take(12).mapNotNull { it.toSearchResponse() }
             if (list.isEmpty()) null else newHomePageResponse(request.name, list)
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "getMainPage ERROR", e)
@@ -190,26 +210,29 @@ open class NartoBaseProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse>? {
-        // Direct to the OPEN mirror (edge), like getMainPage — not via the CF-prone tryMirrors
-        // fallback that could empty results on device. URL-encode the user's free-text query.
+        // Same direct search — MAIN_HOST first, fallback to mainUrl. URL-encode the free text.
         return try {
-            val q = java.net.URLEncoder.encode(query, "UTF-8")
-            val html = app.get("$mainUrl/search?lang=ar-SA&q=$q", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
-            val items = parseSearchItems(html)
-            items.mapNotNull { it.toSearchResponse() }
+            val html = fetchSearch(query)
+            if (html == null) return null
+            parseSearchItems(html).mapNotNull { it.toSearchResponse() }
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "search ERROR q=$query", e)
             null
         }
     }
 
+    // The base used to build result links = the host that actually served the last search,
+    // so a NartoEdgeProvider whose search fell back to MAIN_HOST still produces main-host links
+    // (same slug, faster route) instead of forcing the slow edge mirror.
+    private var searchBase: String = MAIN_HOST
+
     private fun SearchHit.toSearchResponse(): SearchResponse? {
         val u = url ?: return null
         val slug = Regex("""/detail/watch/([^/?]+)""").find(u)?.groupValues?.get(1) ?: return null
         val name = this.name ?: return null
         // Keep the "[مدبلج] ..." prefix so dubbed entries are obviously marked.
-        val poster = image?.let { if (it.startsWith("http")) it else mainUrl + it }
-        return newTvSeriesSearchResponse(name, "$mainUrl/detail/watch/$slug", TvType.TvSeries) {
+        val poster = image?.let { if (it.startsWith("http")) it else searchBase + it }
+        return newTvSeriesSearchResponse(name, "$searchBase/detail/watch/$slug", TvType.TvSeries) {
             this.posterUrl = poster
         }
     }
@@ -218,19 +241,23 @@ open class NartoBaseProvider : MainAPI() {
         val t0 = System.currentTimeMillis()
         return try {
             val slug = Regex("""/detail/watch/([^/?]+)""").find(url)?.groupValues?.get(1) ?: return null
+            // The host the user actually opened (from the url we built) — use it for the detail page
+            // AND episode links, so a NartoEdgeProvider item whose search fell back to MAIN_HOST
+            // opens/stays on main (same slug, faster route) instead of bouncing to the slow mirror.
+            val loadHost = Regex("""https://([^/]+)/detail/watch/""").find(url)?.groupValues?.get(1)
+                ?.let { "https://$it" } ?: mainUrl
             // Use app.get(...).document (the SDK's own Jsoup-backed accessor) — importing Jsoup
             // directly to re-parse a text body is NOT reliably on the plugin classpath and made the
-            // detail page fail after v8. Detail is a low-CF path; keep it on the direct mainUrl
-            // form like v7. (Single-domain now — no failover anywhere.)
+            // detail page fail after v8. Detail is a low-CF path — keep on the host the user chose.
             // edge occasionally returns TRANSIENT 502 on a detail page (verified live: same slug
-            // 502 then 200 on retry). Retry ONCE so an intermittent bad-gateway doesn't show the
-            // user a dead detail page — the retry is on the SAME domain, ~1s apart.
+            // 502 then 200 on retry). Retry a couple times so an intermittent bad-gateway doesn't
+            // show the user a dead detail page — the retries stay on the SAME host.
             var doc: org.jsoup.nodes.Document? = null
             var attempt = 0
             while (attempt < 3 && doc == null) {
                 attempt++
                 try {
-                    doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 20000L).document
+                    doc = app.get("$loadHost/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 20000L).document
                 } catch (e: Exception) {
                     android.util.Log.e("NartoDrama", "load attempt=$attempt/3 slug=$slug error=${e.message?.take(80)}", e)
                     // Some slow slugs take 12-19s to build; wait a bit longer between retries so an
@@ -241,7 +268,7 @@ open class NartoBaseProvider : MainAPI() {
                 }
             }
             if (doc == null) return null
-            android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
+            android.util.Log.e("NartoDrama", "load slug=$slug host=$loadHost fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
                 ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
@@ -254,7 +281,7 @@ open class NartoBaseProvider : MainAPI() {
                     val href = el.attr("href") ?: return@mapNotNull null
                     val ep = Regex("""/detail/watch/[^/]+/(\d+)""").find(href)?.groupValues?.get(1)
                         ?.toIntOrNull() ?: return@mapNotNull null
-                    newEpisode("$mainUrl/detail/watch/$slug/$ep") {
+                    newEpisode("$loadHost/detail/watch/$slug/$ep") {
                         episode = ep
                         name = "الحلقة $ep"
                     }
@@ -268,7 +295,7 @@ open class NartoBaseProvider : MainAPI() {
             if (eps.isEmpty()) {
                 android.util.Log.e("NartoDrama", "load slug=$slug no static episodes -> fallback single ep=1")
                 eps = listOf(
-                    newEpisode("$mainUrl/detail/watch/$slug/1") {
+                    newEpisode("$loadHost/detail/watch/$slug/1") {
                         episode = 1
                         name = "الحلقة"
                     }
@@ -357,67 +384,90 @@ open class NartoBaseProvider : MainAPI() {
         return fetchRefresh(slug, ep, mainUrl)
     }
 
-    // v24: For SHORTMAX works, refresh-source's play/direct links are dead on arrival
-    // (shortmax-stream.narto-drama.com/{token} -> 410 "link expired"), but the SITE still plays
-    // them via the player page /detail/watch/{slug}/{ep} -> `episodeItemsRaw` -> entry.direct_play_url,
-    // whose jwt src is the real akamai CDN master
-    // (akamai-static.shorttv.live/hls/{uuid}_{480}/main.m3u8?auth_key=...). That auth_key is
-    // quality-agnostic — _480/_720/_1080 all serve a real HLS (200 + segments, verified live).
-    // This helper fetches the player page, finds the current episode's direct_play_url jwt, decodes
-    // its src, and rebuilds the 3 real quality URLs — the SAME path the site uses to play.
-    private suspend fun siteAkamaiLinks(slug: String, ep: String): List<Triple<String, String, String>> {
+    // v25: The SITE's own player feeds from /detail/watch/{slug}/{ep} -> `episodeItemsRaw`, which is
+    // the ONLY place that carries EVERY quality you see on the site FOR THE CURRENT EPISODE:
+    //   - direct_play_url   = the LIVE source the site actually plays (stream-e1.narto-drama.com
+    //                          /e/m/{jwt} -> its src is the signed shortmax-stream token that returns
+    //                          200 + real HLS segments — verified live; NOT the dead stale token that
+    //                          refresh-source returns).
+    //   - multi_resolutions = the labelled per-quality set (1080p/720p/480p for shortmax, 1080p/720p
+    //                          for moboreels) — the SAME list the site's quality selector shows.
+    // refresh-source, by contrast, returns stale/expired tokens (410) and multi_resolutions=0, which is
+    // why only ONE quality showed. So v25 reads the player page and emits ALL of the site's qualities.
+    // result: direct live play URL (may be null) + ordered labelled quality list (url, label, quality).
+    private suspend fun episodeItemLinks(slug: String, ep: String, pageBase: String): Pair<String?, List<Triple<String, String, String>>> {
+        val empty = null to emptyList<Triple<String, String, String>>()
         return try {
-            val body = app.get(
-                "$mainUrl/detail/watch/$slug/$ep",
-                referer = nartoOrigin,
-                headers = mapOf("User-Agent" to UA),
-                timeout = 25000L
-            ).text
-            // Find `const episodeItemsRaw = [...]` then parse the array (it may contain escaped \/).
+            // Player page is stable on the MAIN host (~200, ~1MB). Intermittent 502 (edge upstream)
+            // — retry with a short backoff like load() does so a bad-gateway doesn't blank qualities.
+            var body: String? = null
+            var attempt = 0
+            while (attempt < 3 && body == null) {
+                attempt++
+                try {
+                    body = app.get(
+                        "$pageBase/detail/watch/$slug/$ep",
+                        referer = nartoOrigin,
+                        headers = mapOf("User-Agent" to UA),
+                        timeout = 30000L
+                    ).text
+                } catch (e: Exception) {
+                    if (attempt < 3) {
+                        try { Thread.sleep(1200) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
+                    }
+                }
+            }
+            if (body == null) { android.util.Log.e("NartoDrama", "episodeItemLinks page failed slug=$slug ep=$ep"); return empty }
             val marker = "episodeItemsRaw"
             val idx = body.indexOf(marker)
-            if (idx < 0) return emptyList()
+            if (idx < 0) return empty
             val arrStart = body.indexOf('[', idx)
-            if (arrStart < 0) return emptyList()
+            if (arrStart < 0) return empty
+            // Balance braces/[ ] respecting strings so escaped \/ and nested quotes don't break it.
             var depth = 0
             var arrEnd = -1
+            var inStr = false
             for (k in arrStart until body.length) {
-                when (body[k]) {
+                val c = body[k]
+                if (inStr) {
+                    if (c == '\\') continue
+                    if (c == '"') inStr = false
+                } else when (c) {
+                    '"' -> inStr = true
                     '[' -> depth++
                     ']' -> { depth--; if (depth == 0) { arrEnd = k; break } }
                 }
             }
-            if (arrEnd < 0) return emptyList()
+            if (arrEnd < 0) return empty
             val arrJson = body.substring(arrStart, arrEnd + 1).replace("\\/", "/")
             val arr = mapper.readValue(arrJson, List::class.java)
-            // Find the entry for this episode (route_episode_number / number == ep) — fall back to first.
-            val entry = (arr as? List<*>)?.mapNotNull { it as? Map<*, *> }
-                ?.firstOrNull { it["route_episode_number"]?.toString() == ep || it["number"]?.toString() == ep }
-                ?: (arr as? List<*>)?.mapNotNull { it as? Map<*, *> }?.firstOrNull()
-                ?: return emptyList()
-            val du = entry["direct_play_url"] as? String ?: return emptyList()
-            // Same JWT decode as allQualities: extract the src.
-            val jwt = du.substringAfter("/e/m/", "").substringBefore("?")
-            if (jwt.isEmpty()) return emptyList()
-            val parts = jwt.split(".")
-            if (parts.size < 2) return emptyList()
-            val b64 = parts[0].filter { it != '=' }
-            val pad = "=".repeat((4 - b64.length % 4) % 4)
-            val raw = java.util.Base64.getUrlDecoder().decode(b64 + pad)
-            val map = mapper.readValue(String(raw, Charsets.UTF_8), Map::class.java)
-            val src = map["src"] as? String ?: return emptyList()
-            // src = https://akamai-static.shorttv.live/hls/{uuid}_{480}/main.m3u8?auth_key=...
-            val m = Regex("""https://[^/]+(/.+?)_\d{3,4}(/main\.m3u8\?auth_key=[^"]*)""").find(src) ?: return emptyList()
-            val cdn = Regex("""https://([^/]+)/""").find(src)?.groupValues?.get(1) ?: return emptyList()
+            val entries = (arr as? List<*>)?.mapNotNull { it as? Map<*, *> } ?: return empty
+            val entry = entries.firstOrNull { it["route_episode_number"]?.toString() == ep || it["number"]?.toString() == ep }
+                ?: entries.firstOrNull()
+                ?: return empty
+
+            // 1) the LIVE play URL (stream-e1/e/m/{jwt} whose src is a real signed master).
+            var liveDu: String? = null
+            val du = entry["direct_play_url"] as? String
+            if (!du.isNullOrBlank() && du.contains("/e/m/")) liveDu = du
+
+            // 2) every labelled quality straight from multi_resolutions (exactly what the site shows).
             val out = mutableListOf<Triple<String, String, String>>()
-            for ((suffix, label) in listOf("_1080" to "1080p", "_720" to "720p", "_480" to "480p")) {
-                out.add(Triple("https://$cdn${m.groupValues[1]}$suffix${m.groupValues[2]}", label, label))
+            val mrs = entry["multi_resolutions"] as? List<*>
+            for (mr in mrs.orEmpty()) {
+                val m = mr as? Map<*, *> ?: continue
+                val url = m["stream_url"] as? String ?: continue
+                if (url.isBlank()) continue
+                val label = m["label"] as? String
+                val res = m["resolution"]?.toString()
+                val q = when (res) { "1080" -> "1080p"; "720" -> "720p"; "540" -> "540p"; else -> (label ?: res ?: "480p") }
+                if (out.none { it.first == url }) out.add(Triple(url, label ?: q, q))
             }
-            // Referer is required by the akamai host — set on the emitted link below.
-            out
+            android.util.Log.e("NartoDrama", "episodeItemLinks slug=$slug ep=$ep liveDu=${liveDu?.isNotBlank() == true} mrs=${out.size}")
+            liveDu to out
         } catch (e: Exception) {
-            android.util.Log.e("NartoDrama", "siteAkamaiLinks ERROR slug=$slug ep=$ep", e)
-            emptyList()
+            android.util.Log.e("NartoDrama", "episodeItemLinks ERROR slug=$slug ep=$ep", e)
+            empty
         }
     }
 
@@ -428,10 +478,13 @@ open class NartoBaseProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         return try {
-            // data = $mainUrl/detail/watch/{slug}/{ep}
+            // data = $loadHost/detail/watch/{slug}/{ep} — derive the host the user opened so the player page
+            // fetch (episodeItemLinks) and any emitted links stay on that same host's route.
             val m = Regex("""/detail/watch/([^/?]+)/(\d+)""").find(data) ?: return false
             val ep = m.groupValues[2]
             var slug = m.groupValues[1]
+            val loadHost = Regex("""https://([^/]+)/detail/watch/""").find(data)?.groupValues?.get(1)
+                ?.let { "https://$it" } ?: mainUrl
 
             var edge = loadRefresh(slug, ep)
             if (edge == null) {
@@ -533,34 +586,9 @@ open class NartoBaseProvider : MainAPI() {
                 any = true
             }
 
-            // Quick liveness probe: a backend token link may be dead on arrival (HTTP 410/403
-            // expired), and listing it just makes the player pick a link that errors. Do a fast
-            // HEAD (falling back to a range GET) with a tight timeout; treat 2xx/3xx as live.
-            fun isLive(u: String): Boolean {
-                return try {
-                    var code = -1
-                    var conn: java.net.HttpURLConnection? = null
-                    try {
-                        conn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
-                        conn.connectTimeout = 2500
-                        conn.readTimeout = 2500
-                        conn.instanceFollowRedirects = true
-                        conn.setRequestProperty("User-Agent", UA)
-                        conn.setRequestProperty("Referer", nartoOrigin)
-                        // Many token servers reject HEAD; send a range GET and just read the status
-                        // + first byte, then abort — cheapest way to distinguish live vs expired.
-                        conn.requestMethod = "GET"
-                        conn.setRequestProperty("Range", "bytes=0-1")
-                        code = conn.responseCode
-                        if (code in 200..399) {
-                            try { conn.inputStream.read() } catch (e: Exception) {}
-                        }
-                    } finally {
-                        conn?.disconnect()
-                    }
-                    code in 200..399
-                } catch (e: Exception) { false }
-            }
+            // v25: removed the per-token liveness probe (2.5-3.5s delay, and tokens often 403/410
+            // anyway). The player page's quality list is authoritative and its direct_play_url is the
+            // live source; probing was the "جودات بطيئة" delay.
 
             // ---- Reconstruct ALL qualities from the play_url JWT ----
             // The stream-e1 /e/m/{jwt} proxy is single-quality (_480), and the multi_resolutions
@@ -595,27 +623,13 @@ open class NartoBaseProvider : MainAPI() {
                 }
             }
 
-            // Group the per-quality token links, dedupe by URL (one master may back several labels).
+            // v25: NO network probing here. The player page (episodeItemLinks) already gives us the
+            // SITE's per-quality list with their real URLs — probing each token (2.5-3.5s, and tokens
+            // often 403/410 anyway) was the "يتاخر بعرض الجودات" delay. We keep a lightweight,
+            // non-probing fallback set from refresh's multi_resolutions for when the page fetch fails.
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
-            val distinctUrls = resolutions.map { it.streamUrl!! }.distinct()
-
-            // Probe every distinct quality link concurrently (parallel threads, ~2.5s timeout each)
-            // so the WORKING qualities surface FIRST and the dead 410/403 tokens are dropped —
-            // matching "اجعل الجودات المتعدده الذي تعمل اول خيار تشغيلي". This adds at most ~2.5s
-            // (single wall-clock wait) because the probes run in parallel, not serially.
-            val liveFlags = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-            if (distinctUrls.isNotEmpty()) {
-                val threads = distinctUrls.map { u ->
-                    Thread { liveFlags[u] = isLive(u) }
-                }
-                threads.forEach { it.start() }
-                threads.forEach { it.join(3500) }
-            }
-
-            // WORKING quality links FIRST, at their true quality.
             val liveOnes = mutableListOf<Triple<String, String, String>>() // url, label, quality
-            val deadOnes = mutableListOf<Triple<String, String, String>>()
             if (resolutions.isNotEmpty()) {
                 val byUrl = linkedMapOf<String, MutableList<String>>()
                 for (r in resolutions) {
@@ -631,7 +645,7 @@ open class NartoBaseProvider : MainAPI() {
                         else -> "480p"
                     }
                     val label = if (labels.size == 1) labels[0] else labels.joinToString("/")
-                    (if (liveFlags[u] == true) liveOnes else deadOnes).add(Triple(u, label, q))
+                    liveOnes.add(Triple(u, label, q))
                 }
             }
             // True resolution of the stream-e1 proxy URI, decoded from the JWT src field it wraps.
@@ -649,52 +663,50 @@ open class NartoBaseProvider : MainAPI() {
             }
             val proxyQ = proxyQuality(edge.directPlayUrl)
 
-            // Emit order = what the user asked: the WORKING multi-quality links FIRST. The
-            // RECONSTRUCTED 3-quality set (1080/720/480 from the JWT src+auth_key — the same real
-            // CDN masters the site's player uses) is the primary source, then the working
-            // multi-res tokens, then the local proxy (كامل/رابط مباشر) as fallback.
-            // Dead 410/403 tokens are NOT emitted (they'd just be dead first taps).
-            val rebuilt = allQualities(edge.directPlayUrl)
-            // v24: for SHORTMAX works the refresh-source play/direct links point at
-            // shortmax-stream.narto-drama.com/{token} — those are EXPIRED (410, "link expired") on
-            // arrival, so they fail on device while the SAME work plays on the site. The site's
-            // player feeds from /detail/watch/{slug}/{ep} -> episodeItemsRaw[i].direct_play_url,
-            // whose jwt src is the REAL akamai CDN master (akamai-static.shorttv.live/hls/{uuid}_
-            // {480}/main.m3u8?auth_key=...) with a quality-agnostic auth_key (verified 200 + real
-            // segments for _480/_720/_1080). That is the playback path that actually works, so for
-            // shortmax works we extract those akamai links from the player page and lead with them.
-            if (rebuilt.isEmpty()) {
-                val ak = siteAkamaiLinks(slug, ep)
-                if (ak.isNotEmpty()) {
-                    android.util.Log.e("NartoDrama", "loadLinks shortmax akamai-links=${ak.size} slug=$slug ep=$ep")
-                    for ((u, label, q) in ak) emit(u, label, q)
-                    // The akamai set IS the working source — skip emitting the dead proxy below.
-                    // Still allow fallback links if the user taps one after a failed stream.
-                    for ((u, label, q) in liveOnes.filter { t -> ak.none { it.first == t.first } }) emit(u, label, q)
-                    var first = true
-                    for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
-                        emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
-                        first = false
-                    }
-                    if (emitted.isEmpty()) return false
-                    android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} any=$any")
-                    return any
+            // Emit order = the SITE's real quality set (v25): fetch the player page for this episode and
+            // emit the LIVE direct_play_url FIRST (the only source that's fresh at fetch time — the
+            // site plays it the moment the page loads) followed by EVERY labelled quality from the
+            // site's selector (multi_resolutions: 1080p/720p/480p for shortmax, 1080p/720p for
+            // moboreels). The multi_resolutions tokens CAN die minutes after the page fetch (they
+            // expire fast), exactly like on the site — listing them keeps the quality labels the user
+            // asked for, while the live du ahead of them guarantees playback still starts.
+            // The player page fetch is the ONLY slow-ish step (~1-6s) — but it is REQUIRED to match
+            // the site's qualities. It runs EVERY episode tap; no skipped probing delay is added.
+            val (liveDu, epQualities) = episodeItemLinks(slug, ep, loadHost)
+
+            // 1) The LIVE direct_play_url (stream-e1/e/m/{jwt}) — the exact source the site's player
+            //    runs, fresh at fetch time. First choice so playback always starts.
+            if (liveDu != null) {
+                emit(liveDu, "كامل", proxyQ)
+            }
+
+            // 2) EVERY labelled quality the site's selector shows (may expire later, like on site).
+            for ((u, label, q) in epQualities) emit(u, label, q)
+
+            // Fallback: the refresh-source proxy links (in case the page fetch failed), deduped.
+            if (epQualities.isEmpty() && liveDu == null) {
+                val rebuilt = allQualities(edge.directPlayUrl)
+                for ((u, label, q) in rebuilt) emit(u, label, q)
+                for ((u, label, q) in liveOnes) emit(u, label, q)
+                var first = true
+                for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
+                    emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
+                    first = false
+                }
+            } else {
+                // Also keep a single "رابط مباشر" refresh proxy as a manual fallback for when the
+                // primary token expires before the user taps (fresh refresh-source token may serve).
+                var first = true
+                for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
+                    emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
+                    first = false
                 }
             }
-            for ((u, label, q) in rebuilt) emit(u, label, q)
-            for ((u, label, q) in liveOnes.filter { t -> rebuilt.none { it.first == t.first } }) emit(u, label, q)
-            var first = true
-            for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
-                emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
-                first = false
-            }
-            // Last resort only: if every quality is dead AND there's no rebuilt set AND no proxy, still
-            // surface the multi-res links so the user can try a manually-refreshed token.
-            if (rebuilt.isEmpty() && liveOnes.isEmpty() && edge.playUrl.isNullOrBlank() && edge.directPlayUrl.isNullOrBlank()) {
-                for ((u, label, q) in deadOnes) emit(u, label, q)
-                android.util.Log.e("NartoDrama", "loadLinks only dead multi-res available (all 410/403), surfacing anyway slug=$slug")
-            } else if (deadOnes.isNotEmpty()) {
-                android.util.Log.e("NartoDrama", "loadLinks dropped ${deadOnes.size} dead quality links slug=$slug")
+            // Last resort: if the player page offered nothing AND refresh had no proxy, surface
+            // the refresh multi-res links raw so the user can at least try a fresh token.
+            if (emitted.isEmpty() && liveOnes.isEmpty() && edge.playUrl.isNullOrBlank() && edge.directPlayUrl.isNullOrBlank()) {
+                for ((u, label, q) in liveOnes) emit(u, label, q)
+                android.util.Log.e("NartoDrama", "loadLinks only refresh multi-res available, surfacing anyway slug=$slug")
             }
 
             // 3) MULTI-AUDIO as TRACKS, not links. The user wants the site's multiple audio tracks to
