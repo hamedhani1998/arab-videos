@@ -356,20 +356,21 @@ class NartoDramaProvider : MainAPI() {
                 any = true
             }
 
-            // v33 (fix 410 'Source error'): the three real multi_resolutions tokens (1080/720/480) are
-            // shortmax-stream signed URLs that EXPIRE to HTTP 410 minutes after refresh — that's
-            // what state=ERROR(7)/Response 410 in logcat shows when the player auto-selects the
-            // first one. So we must NOT emit the tokens as separate selectable links (v32 did that
-            // and reintroduced the 410). The SAFE, always-alive source is the narto proxy
-            // (direct_play_url / play_url — stream-e1/e/m/{jwt}) which proxies the HLS/MP4 directly
-            // and never expires to 410. That is the primary "كامل" link.
-            //
-            // To satisfy "multiple qualities" where the proxy is single-rendition, ALSO emit the
-            // single highest multi_resolutions stream_url as a fresh "جودة متعددة" token (it works
-            // if tapped immediately after refresh) — but NEVER the full 1080/720/480 set (the
-            // player would pick a dead one). One fresh master + the always-live proxy.
+            // v36 (fix "وفي جوده 1080 اختفت"): the site lists every quality and the user WANTS them
+            // all visible — but the shortmax tokens expire to 410 within minutes. Winning hybrid:
+            //   1) "كامل" = the narto proxy (stream-e1.narto-drama.com/e/m/{jwt}) ONLY, and only
+            //      when the host is REALLY the proxy. The fatal logcat proved direct_play_url can
+            //      ITSELF be a shortmax-stream token (which 410s) — so we never label a shortmax
+            //      URL "كامل" (that made the player auto-select a dead link = "لا يستجيب").
+            //   2) EVERY multi_resolutions quality as its own labelled link (1080p/720p/480p),
+            //      highest-first — the full real set is back. Tokens may 410 if tapped minutes
+            //      later (site-inherent: they re-mint at play time), but the always-alive "كامل"
+            //      proxy is first, so the player always auto-selects a responsive link.
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
+
+            fun proxyHost(u: String): String =
+                u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
 
             fun proxyQuality(u: String?): String {
                 val s = u ?: return "480p"
@@ -379,32 +380,38 @@ class NartoDramaProvider : MainAPI() {
                 return if (q == null) "480p" else "${q}p"
             }
 
-            // v34 (fix "720 لا تظهر"): show EVERY quality the API returns as its own selectable
-            // link (1080p / 720p / 480p) — the user explicitly wants all of them, for real.
-            // Ordering: the ALWAYS-ALIVE narto proxy ("كامل") FIRST so the default tap always
-            // plays (this is the "الجودة الأكثر استجابة" — it never 410s), then the real
-            // quality tokens highest-first so the player's selector lists the full set.
-            //
-            // The quality tokens are shortmax signed URLs that MAY expire to 410 minutes later —
-            // that's inherent to the site, and having "كامل" first guarantees a working link.
-            fun rendQ(r: com.nartodrama.plugin.NartoResolution): String =
-                when (r.resolution) {
-                    2160 -> "2160p"; 1440 -> "1440p"; 1080 -> "1080p"; 720 -> "720p"
-                    540 -> "540p"; 480 -> "480p"; 360 -> "360p"; else -> (r.resolution?.toString() ?: "480") + "p"
-                }
-
-            // 1) Always-live proxy direct (single quality, always plays) — first & reliable.
-            val proxyQ = proxyQuality(edge.directPlayUrl)
-            for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
-                emit(u, "كامل", proxyQ)
+            fun rendQ(r: NartoResolution): String {
+                val q = r.resolution
+                if (q != null && q > 0) return "${q}p"
+                val m = Regex("""(\d{3,4})p""").find(r.label ?: "")
+                return if (m == null) "480p" else m.groupValues[1] + "p"
             }
 
-            // 2) Every real quality as its own labelled link (highest first).
-            val orderedRends = resolutions.sortedByDescending { it.resolution ?: 0 }
-            for (r in orderedRends) {
+            // 1) Always-live proxy first — "كامل", but ONLY when it's the real proxy host.
+            for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
+                if (u.isBlank()) continue
+                if (proxyHost(u).startsWith("stream-e1")) {
+                    emit(u, "كامل", proxyQuality(u))
+                }
+            }
+
+            // 2) Every real quality as its own labelled link (highest first) — 1080/720/480 restored.
+            for (r in resolutions.sortedByDescending { it.resolution ?: 0 }) {
                 val u = r.streamUrl ?: continue
                 val q = rendQ(r)
                 emit(u, q, q)
+            }
+
+            // Fallback: if even proxy + tokens yielded nothing, surface the highest token so the
+            // player has SOMETHING (may 410 later, but never hand back an empty list).
+            if (emitted.isEmpty()) {
+                val best = resolutions.maxByOrNull { it.resolution ?: 0 } ?: resolutions.firstOrNull()
+                val masterUrl = best?.streamUrl
+                if (!masterUrl.isNullOrBlank()) {
+                    val labels = resolutions.filter { it.streamUrl == masterUrl }.mapNotNull { it.label }
+                    val label = if (labels.isEmpty()) "جودة متعددة" else "جودة متعددة · " + labels.joinToString("/")
+                    emit(masterUrl, label, "1080p")
+                }
             }
 
             // Fallback: if even that yielded nothing (no proxy, top token dead), surface whatever
