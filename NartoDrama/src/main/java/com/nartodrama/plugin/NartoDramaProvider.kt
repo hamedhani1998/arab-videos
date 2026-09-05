@@ -12,12 +12,19 @@ private val mapper = ObjectMapper().registerKotlinModule()
 
 private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-// ---- edge.narto-drama.com is the OPEN (no-Cloudflare) mirror of narto-drama.com ----
-// It serves the native Arabic catalog (including ALL dubbed مدبلج content) at
-//   GET /search?lang=ar-SA&q=<query>   -> HTML page embedding a ListItem JSON array
-//   GET /detail/watch/{slug}           -> series detail (h1, poster, episode list)
-//   GET /e/rs/detail/watch/{slug}/{ep}/refresh-source?rs_ctx={JWT} -> playback
-// The web frontend narto-drama.com itself is Cloudflare-protected; edge is not.
+// ---- Domain layout (resilience per-purpose, NOT mirror-merging) ----
+//   BROWSE (search/detail):        edge.narto-drama.com — the OPEN (no-Cloudflare) mirror,
+//                                  fast, serves the native Arabic catalog (incl. all مدبلج).
+//   PLAYBACK (refresh-source):     narto-drama.com MAIN is now the fast path (~1s, same payload,
+//                                  and NOT Cloudflare-blocked on this API route), while edge's
+//                                  own refresh-source became SLOW (12-41s — over the default client
+//                                  timeout -> dead links). loadLinks fetches main first, edge fallback.
+// edge endpoints:
+//   GET /search?lang=ar-SA&q=<query>                                -> HTML ListItem JSON array
+//   GET /detail/watch/{slug}                                        -> series detail
+//   GET /e/rs/detail/watch/{slug}/{ep}/refresh-source?rs_ctx={JWT}  -> playback (either base)
+// The web HTML frontend narto-drama.com itself has Cloudflare around the pages, but the
+// refresh-source API responds to bare requests — that's what made it viable for playback.
 
 // One JSON-LD ListItem entry from the search results page.
 private data class SearchHit(
@@ -61,6 +68,10 @@ private data class EdgeSub(
 
 // Minimal fake JWT the edge accepts (claims are not verified, slug/ep read from path).
 private val fakeRsCtx = "eyJhbGciOiJub25lIn0.eyJ2IjoiMSJ9."
+// The main narto domain serves refresh-source FAST (~1s) with the full payload and no Cloudflare
+// challenge on that API route. edge still works but is now SLOW there (12-41s) — over a client
+// timeout -> "فشل بالروابط". loadLinks uses this as the PRIMARY playback host.
+private const val MAIN_HOST = "https://narto-drama.com"
 private const val STREAM_HOST = "https://stream.narto-drama.com"
 
 // Backend hosts that are dead (DNS NODATA / non-existent domain) and must NOT be emitted as
@@ -278,31 +289,43 @@ class NartoDramaProvider : MainAPI() {
         }
     }
 
-    // Fetch the narto edge refresh-source payload for a canonical slug+episode.
-    // NOTE: edge is the ONE open backend (single-domain — no mirror merging). It occasionally
-    // hiccups with a transient SocketTimeoutException on a play tap (e.g. wdth-kwryth-at had
-    // "java.net.SocketTimeoutException: timeout" then succeeded on the very next call ~1s later).
-    // edgeRefreshSource is a stateless GET, so on a network error we wait briefly and retry ONCE
-    // on the SAME domain — a resilience retry, not a mirror failover. Without it a one-off timeout
-    // swallowed the good response and the user saw "لم يتم العثور على روابط".
-    private suspend fun edgeRefreshSource(slug: String, ep: String): EdgeResponse? {
+    // Fetch the narto refresh-source payload for a canonical slug+episode.
+    // Since the mirror split, MAIN (narto-drama.com) is the FAST and reliable playback host
+    // (~1s, full payload, no CF on the API route), while edge's own refresh-source became slow
+    // (12-41s — longer than the default client timeout, which surfaced as dead links). So the
+    // playback fetch tries MAIN first (with a couple of resilience retries), then falls back to
+    // EDGE with an extended 60s timeout so it still works when edge is merely slow, not down.
+    // Whichever host answers, we parse the SAME EdgeResponse shape.
+    private suspend fun fetchRefresh(slug: String, ep: String, base: String): EdgeResponse? {
         var attempt = 0
         while (attempt < 2) {
             attempt++
             try {
-                val body = app.get("$mainUrl/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx", referer = nartoOrigin).text
+                val body = app.get(
+                    "$base/e/rs/detail/watch/$slug/$ep/refresh-source?rs_ctx=$fakeRsCtx",
+                    referer = nartoOrigin,
+                    timeout = 60000L
+                ).text
                 val edge = mapper.readValue(body, EdgeResponse::class.java)
-                // A JSON parse that lands on an explicit edge outage isn't a retry candidate.
+                // A JSON parse that lands on an explicit outage isn't a retry candidate.
                 // A successful read (even ok!=true with other messages) is final.
                 return edge
             } catch (e: Exception) {
-                android.util.Log.e("NartoDrama", "edgeRefreshSource ERROR attempt=$attempt/2 slug=$slug ep=$ep", e)
+                android.util.Log.e("NartoDrama", "fetchRefresh ERROR attempt=$attempt/2 host=$base slug=$slug ep=$ep", e)
                 if (attempt < 2) {
                     try { Thread.sleep(800) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
                 }
             }
         }
         return null
+    }
+
+    private suspend fun loadRefresh(slug: String, ep: String): EdgeResponse? {
+        // MAIN first (fast ~1s, reliable payload), edge second as a slow-but-working fallback.
+        val main = fetchRefresh(slug, ep, MAIN_HOST)
+        if (main != null) return main
+        android.util.Log.e("NartoDrama", "fetchRefresh main dead -> edge fallback slug=$slug ep=$ep")
+        return fetchRefresh(slug, ep, mainUrl)
     }
 
     override suspend fun loadLinks(
@@ -317,7 +340,7 @@ class NartoDramaProvider : MainAPI() {
             val ep = m.groupValues[2]
             var slug = m.groupValues[1]
 
-            var edge = edgeRefreshSource(slug, ep)
+            var edge = loadRefresh(slug, ep)
             if (edge == null) {
                 android.util.Log.e("NartoDrama", "loadLinks NO EDGE (all mirrors failed or JSON parse error) slug=$slug ep=$ep")
                 return false
@@ -333,7 +356,7 @@ class NartoDramaProvider : MainAPI() {
                 if (canon != null && canon != slug) {
                     android.util.Log.e("NartoDrama", "loadLinks slug_mismatch $slug -> $canon ep=$ep")
                     slug = canon
-                    edge = edgeRefreshSource(slug, ep)
+                    edge = loadRefresh(slug, ep)
                     if (edge == null) return false
                 }
             }
