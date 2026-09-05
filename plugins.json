@@ -22,7 +22,7 @@
  {
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-  "fileSize": 34461,
+  "fileSize": 30584,
   "status": 1,
   "language": "ar",
   "authors": [
@@ -32,7 +32,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 31,
+  "version": 32,
   "internalName": "NartoDrama",
   "description": "Narto Drama - مسلسلات دراما مترجمة",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/NartoDrama.cs3",
@@ -42,7 +42,7 @@
  {
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-  "fileSize": 34444,
+  "fileSize": 30606,
   "status": 1,
   "language": "ar",
   "authors": [
@@ -52,7 +52,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 2,
+  "version": 3,
   "internalName": "NartoEdge",
   "description": "Edge Narto Drama - مسلسلات دراما مترجمة",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/NartoEdge.cs3",

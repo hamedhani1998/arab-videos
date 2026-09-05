@@ -357,27 +357,24 @@ class EdgeNartoProvider : MainAPI() {
                 any = true
             }
 
-            // ONE combined multi-quality link (the user's verified preference): the highest
-            // multi_resolutions master. ExoPlayer's in-player switcher handles 1080/720/480 (or
-            // plays if single-quality) — never the separate expiring 410 tokens.
+            // v3 (fix "جودة واحدة" seen as one quality): surface EVERY quality the API returns.
+            // multi_resolutions = the per-rendition links (1080p/720p/480p). The OLD approach
+            // emitted ONLY the highest `stream_url` named "جودة متعددة" — but that token is a
+            // SINGLE-rendition HLS playable, so the player exposed just one quality (the mask
+            // "جودة متعددة" while playing a single 480p/1080p). The site itself plays multi by
+            // rendering separates. So now we emit ALL renditions as real, quality-labelled links
+            // (player shows the full selector), plus the proxy direct as "كامل". NO single
+            // "multi" master — the real qualities instead. Tokens are fresh from refresh-source.
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
-            val liveOnes = mutableListOf<Triple<String, String, String>>()
-            if (resolutions.isNotEmpty()) {
-                val byUrl = linkedMapOf<String, MutableList<String>>()
-                for (r in resolutions) {
-                    byUrl.getOrPut(r.streamUrl!!) { mutableListOf() }
-                        .add(r.label ?: "${r.resolution ?: 480}p")
+
+            // Quality of a rendition stream_url (the API gives resolution int; on shortmax the
+            // folder also carries it — prefer the int).
+            fun rendQ(r: com.nartoedge.plugin.EdgeResolution): String =
+                when (r.resolution) {
+                    2160 -> "2160p"; 1440 -> "1440p"; 1080 -> "1080p"; 720 -> "720p"
+                    540 -> "540p"; 480 -> "480p"; 360 -> "360p"; else -> (r.resolution?.toString() ?: "480") + "p"
                 }
-                for ((u, labels) in byUrl) {
-                    val res = resolutions.firstOrNull { it.streamUrl == u }?.resolution
-                    val q = when (res) {
-                        1080 -> "1080p"; 720 -> "720p"; 540 -> "540p"; else -> "480p"
-                    }
-                    val label = if (labels.size == 1) labels[0] else labels.joinToString("/")
-                    liveOnes.add(Triple(u, label, q))
-                }
-            }
 
             fun proxyQuality(u: String?): String {
                 val s = u ?: return "480p"
@@ -386,26 +383,26 @@ class EdgeNartoProvider : MainAPI() {
                 val q = Regex("""_(\d{3,4})p""").find(dec)?.groupValues?.get(1)
                 return if (q == null) "480p" else "${q}p"
             }
+
+            // Emit every rendition, HIGHEST quality FIRST, each as its own quality-labelled link.
+            // These are the site's REAL multi qualities — the player's selector now lists them.
+            val orderedRends = resolutions.sortedByDescending { it.resolution ?: 0 }
+            for (r in orderedRends) {
+                val u = r.streamUrl ?: continue
+                val q = rendQ(r)
+                emit(u, q, q)
+            }
+
+            // Then the working proxy direct (single default quality) as "كامل".
             val proxyQ = proxyQuality(edge.directPlayUrl)
-
-            val mres = edge.multiResolutions.orEmpty().filter { !it.streamUrl.isNullOrBlank() }
-            val best = mres.maxByOrNull { (it.resolution ?: 0) } ?: mres.firstOrNull()
-            val masterUrl = best?.streamUrl
-            if (!masterUrl.isNullOrBlank()) {
-                val labels = mres.filter { it.streamUrl == masterUrl }.mapNotNull { it.label }
-                val label = if (labels.isEmpty()) "جودة متعددة" else "جودة متعددة · " + labels.joinToString("/")
-                emit(masterUrl, label, "1080p")
-            }
-
-            var first = true
             for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
-                emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
-                first = false
+                emit(u, "كامل", proxyQ)
             }
 
+            // Fallback: if even that yielded nothing (no multi, no proxies), surface whatever
+            // multi-res is left (shouldn't happen, but never hand back an empty list).
             if (emitted.isEmpty()) {
-                for ((u, label, q) in liveOnes) emit(u, label, q)
-                android.util.Log.e("EdgeNarto", "loadLinks only refresh multi-res available, surfacing anyway slug=$slug")
+                android.util.Log.e("EdgeNarto", "loadLinks no qualities emitted (all died?) slug=$slug")
             }
 
             android.util.Log.e("EdgeNarto", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
