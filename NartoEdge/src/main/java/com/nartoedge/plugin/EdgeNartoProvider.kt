@@ -380,23 +380,32 @@ class EdgeNartoProvider : MainAPI() {
                 return if (q == null) "480p" else "${q}p"
             }
 
-            // 1) ONE fresh multi-quality token FIRST (highest rendition) — the player auto-selects
-            //    the first link, so put the BEST quality up-front. Named to SHOW the multiple
-            //    formats present (1080p/720p/480p) — the "سعى صيغ الجودات المتعددة" the user
-            //    confirmed works. If tapped immediately after refresh the only token is fresh and
-            //    plays; it may expire to 410 minutes later.
-            val best = resolutions.maxByOrNull { it.resolution ?: 0 } ?: resolutions.firstOrNull()
-            val masterUrl = best?.streamUrl
-            if (!masterUrl.isNullOrBlank()) {
-                val labels = resolutions.filter { it.streamUrl == masterUrl }.mapNotNull { it.label }
-                val label = if (labels.isEmpty()) "جودة متعددة" else "جودة متعددة · " + labels.joinToString("/")
-                emit(masterUrl, label, "1080p")
-            }
+            // v5 (fix "720 لا تظهر"): show EVERY quality the API returns as its own selectable
+            // link (1080p / 720p / 480p) — the user explicitly wants all of them, for real.
+            // Ordering: the ALWAYS-ALIVE narto proxy ("كامل") FIRST so the default tap always
+            // plays (this is the "الجودة الأكثر استجابة" — it never 410s), then the real
+            // quality tokens highest-first so the player's selector lists the full set.
+            //
+            // The quality tokens are shortmax signed URLs that MAY expire to 410 minutes later —
+            // that's inherent to the site, and having "كامل" first guarantees a working link.
+            fun rendQ(r: com.nartoedge.plugin.EdgeResolution): String =
+                when (r.resolution) {
+                    2160 -> "2160p"; 1440 -> "1440p"; 1080 -> "1080p"; 720 -> "720p"
+                    540 -> "540p"; 480 -> "480p"; 360 -> "360p"; else -> (r.resolution?.toString() ?: "480") + "p"
+                }
 
-            // 2) Always-live proxy direct (single quality, always plays) as the reliable fallback.
+            // 1) Always-live proxy direct (single quality, always plays) — first & reliable.
             val proxyQ = proxyQuality(edge.directPlayUrl)
             for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
                 emit(u, "كامل", proxyQ)
+            }
+
+            // 2) Every real quality as its own labelled link (highest first).
+            val orderedRends = resolutions.sortedByDescending { it.resolution ?: 0 }
+            for (r in orderedRends) {
+                val u = r.streamUrl ?: continue
+                val q = rendQ(r)
+                emit(u, q, q)
             }
 
             // Fallback: if even that yielded nothing (no proxy, top token dead), surface whatever
