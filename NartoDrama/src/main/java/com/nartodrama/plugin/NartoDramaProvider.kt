@@ -394,9 +394,18 @@ open class NartoBaseProvider : MainAPI() {
     //                          for moboreels) — the SAME list the site's quality selector shows.
     // refresh-source, by contrast, returns stale/expired tokens (410) and multi_resolutions=0, which is
     // why only ONE quality showed. So v25 reads the player page and emits ALL of the site's qualities.
-    // result: direct live play URL (may be null) + ordered labelled quality list (url, label, quality).
-    private suspend fun episodeItemLinks(slug: String, ep: String, pageBase: String): Pair<String?, List<Triple<String, String, String>>> {
-        val empty = null to emptyList<Triple<String, String, String>>()
+    // v26: the player page also carries the FULL subtitle & audio set (multi_subtitles,
+    // direct_subtitle_url, direct_audio_url) which refresh-source sometimes omits — collect it too so
+    // nothing the site offers is dropped.
+    private data class EpisodeItemData(
+        val liveDu: String?,
+        val qualities: List<Triple<String, String, String>>, // url, label, quality
+        val subs: List<Pair<String, String>>,   // lang -> resolved URL
+        val audio: List<Pair<String, String>>,  // lang -> resolved URL
+    )
+
+    private suspend fun episodeItemLinks(slug: String, ep: String, pageBase: String): EpisodeItemData {
+        val empty = EpisodeItemData(null, emptyList(), emptyList(), emptyList())
         return try {
             // Player page is stable on the MAIN host (~200, ~1MB). Intermittent 502 (edge upstream)
             // — retry with a short backoff like load() does so a bad-gateway doesn't blank qualities.
@@ -463,8 +472,28 @@ open class NartoBaseProvider : MainAPI() {
                 val q = when (res) { "1080" -> "1080p"; "720" -> "720p"; "540" -> "540p"; else -> (label ?: res ?: "480p") }
                 if (out.none { it.first == url }) out.add(Triple(url, label ?: q, q))
             }
-            android.util.Log.e("NartoDrama", "episodeItemLinks slug=$slug ep=$ep liveDu=${liveDu?.isNotBlank() == true} mrs=${out.size}")
-            liveDu to out
+            // 3) EVERY subtitle/dub the page offers (multi_subtitles + direct_subtitle_url +
+            //    direct_audio_url) — resolve relative /e/s/{jwt} & /e/a/{jwt} against stream host.
+            val subs = mutableListOf<Pair<String, String>>()
+            val audio = mutableListOf<Pair<String, String>>()
+            (entry["multi_subtitles"] as? List<*>)?.forEach { ms ->
+                val mm = ms as? Map<*, *> ?: return@forEach
+                val url = mm["subtitle_url"] as? String ?: return@forEach
+                if (url.isBlank()) return@forEach
+                val lang = (mm["label"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: (mm["language_code"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: "ترجمة"
+                subs.add(lang to (if (url.startsWith("http")) url else STREAM_HOST + url))
+            }
+            val dSub = entry["direct_subtitle_url"] as? String
+            if (!dSub.isNullOrBlank() && !dSub.contains("undefined"))
+                subs.add("ترجمة مباشرة" to (if (dSub.startsWith("http")) dSub else STREAM_HOST + dSub))
+            val dAud = entry["direct_audio_url"] as? String
+            if (!dAud.isNullOrBlank() && !dAud.contains("undefined"))
+                audio.add("صوت" to (if (dAud.startsWith("http")) dAud else STREAM_HOST + dAud))
+
+            android.util.Log.e("NartoDrama", "episodeItemLinks slug=$slug ep=$ep liveDu=${liveDu?.isNotBlank() == true} mrs=${out.size} subs=${subs.size} aud=${audio.size}")
+            EpisodeItemData(liveDu, out, subs, audio)
         } catch (e: Exception) {
             android.util.Log.e("NartoDrama", "episodeItemLinks ERROR slug=$slug ep=$ep", e)
             empty
@@ -663,28 +692,36 @@ open class NartoBaseProvider : MainAPI() {
             }
             val proxyQ = proxyQuality(edge.directPlayUrl)
 
-            // Emit order = the SITE's real quality set (v25): fetch the player page for this episode and
-            // emit the LIVE direct_play_url FIRST (the only source that's fresh at fetch time — the
-            // site plays it the moment the page loads) followed by EVERY labelled quality from the
-            // site's selector (multi_resolutions: 1080p/720p/480p for shortmax, 1080p/720p for
-            // moboreels). The multi_resolutions tokens CAN die minutes after the page fetch (they
-            // expire fast), exactly like on the site — listing them keeps the quality labels the user
-            // asked for, while the live du ahead of them guarantees playback still starts.
-            // The player page fetch is the ONLY slow-ish step (~1-6s) — but it is REQUIRED to match
-            // the site's qualities. It runs EVERY episode tap; no skipped probing delay is added.
-            val (liveDu, epQualities) = episodeItemLinks(slug, ep, loadHost)
+            // v26 emit order (matches what the user verified PLAYING on device): the site's real
+            // quality set from the player page — multi_resolutions FIRST as the DEFAULT (1080p/720p/
+            // 480p; user-confirmed these play on device), then the live "كامل" direct_play_url as a
+            // fallback. In v25 the live du was emitted FIRST and Source-errored on device while the
+            // multi-res links played — hence the swap. multi_resolutions tokens can expire minutes
+            // after the page fetch (exactly like on the site), so the live du fallback sits behind.
+            // The player page fetch is the ONLY slow-ish step (~1-6s) — required to match the site's
+            // qualities. It runs on every episode tap; no probing delay is added.
+            val page = episodeItemLinks(slug, ep, loadHost)
 
-            // 1) The LIVE direct_play_url (stream-e1/e/m/{jwt}) — the exact source the site's player
-            //    runs, fresh at fetch time. First choice so playback always starts.
-            if (liveDu != null) {
-                emit(liveDu, "كامل", proxyQ)
+            // 1) DEFAULT — EVERY labelled quality the site's selector shows (multi_resolutions).
+            for ((u, label, q) in page.qualities) emit(u, label, q)
+
+            // 2) The LIVE direct_play_url (stream-e1/e/m/{jwt} — the exact source the site's player
+            //    runs, fresh at fetch time) as the fallback behind the device-verified qualities.
+            if (page.liveDu != null) {
+                emit(page.liveDu, "كامل", proxyQ)
             }
 
-            // 2) EVERY labelled quality the site's selector shows (may expire later, like on site).
-            for ((u, label, q) in epQualities) emit(u, label, q)
+            // 3) Merge the player page's OWN subtitle set (multi_subtitles + direct_subtitle_url) —
+            //    the page sometimes lists tracks refresh-source misses ("ملفات الترجمة بالكامل").
+            //    lang -> URL is already resolved; dedupe against refresh's seenSubs by URL.
+            for ((lang, rel) in page.subs) {
+                val subUrl = if (rel.startsWith("http")) rel else STREAM_HOST + rel
+                if (!seenSubs.add(subUrl)) continue
+                try { subtitleCallback(newSubtitleFile(lang, subUrl)) } catch (e: Exception) {}
+            }
 
             // Fallback: the refresh-source proxy links (in case the page fetch failed), deduped.
-            if (epQualities.isEmpty() && liveDu == null) {
+            if (page.qualities.isEmpty() && page.liveDu == null) {
                 val rebuilt = allQualities(edge.directPlayUrl)
                 for ((u, label, q) in rebuilt) emit(u, label, q)
                 for ((u, label, q) in liveOnes) emit(u, label, q)
@@ -709,12 +746,14 @@ open class NartoBaseProvider : MainAPI() {
                 android.util.Log.e("NartoDrama", "loadLinks only refresh multi-res available, surfacing anyway slug=$slug")
             }
 
-            // 3) MULTI-AUDIO as TRACKS, not links. The user wants the site's multiple audio tracks to
-            //    surface as AUDIO TRACKS in the player (مسارات الصوت) — NOT as separate audio links.
-            //    The video links above ARE the HLS masters; their #EXT-X-MEDIA:TYPE=AUDIO groups make
-            //    ExoPlayer populate the audio-track selector automatically. So we emit NO standalone
-            //    "صوت منفصل" link and NO separate "صوت:" group links — the player's native audio-track
-            //    switcher lists every audio (ar-SA / stream_1 / ...) when the chosen master is played.
+            // 3) AUDIO via TRACKS, not links (the user asked for an audio switcher "مثل الترجمة" and
+            //    explicitly rejected any standalone audio that plays without video). The video links
+            //    above ARE the HLS masters; when a master carries #EXT-X-MEDIA:TYPE=AUDIO groups,
+            //    ExoPlayer populates the native audio-track switcher (مسارات الصوت) — picking a
+            //    language there keeps the video rolling, exactly what the user wants. That is the ONLY
+            //    correct path here: probing this backend (shortmax) shows no separate audio — the
+            //    tracks live inside the master. So we emit NO standalone "صوت منفصل" link and NO
+            //    "صوت:" group link; the player's audio selector lists them when the chosen master plays.
 
             android.util.Log.e("NartoDrama", "loadLinks DONE slug=$slug ep=$ep links=${emitted.size} subs=${subTracks.size} deadSkipped=$skippedDead any=$any")
             any
