@@ -171,14 +171,20 @@ open class NartoBaseProvider : MainAPI() {
     // searches edge.narto-drama.com and "Narto Drama" searches narto-drama.com — the user asked
     // for each source to stay on its own domain. Only if that host fails do we try the sibling,
     // purely as a resilience net so a 502/slow host never blanks the list.
+    // v29 (perf): page=1&perPage=12 measurably faster than the bare query, and a per-tab cache
+    // means switching between the two sources (or re-entering) serves the heavy /search page
+    // from memory instead of re-fetching the 435KB HTML (the "بيتاخر بالرئيسي" pain).
+    private val searchCache = HashMap<String, String>() // q -> html (per provider instance)
     private suspend fun fetchSearch(q: String): String? {
+        searchCache[q]?.let { return it }
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
         val hosts = if (mainUrl == MAIN_HOST) listOf(MAIN_HOST) else listOf(mainUrl, MAIN_HOST)
         for (h in hosts) {
             try {
-                val html = app.get("$h/search?lang=ar-SA&q=$urlEncQ", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
+                val html = app.get("$h/search?lang=ar-SA&q=$urlEncQ&page=1&perPage=12", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
                 if (html.contains("\"@type\":\"ListItem\"")) {
                     searchBase = h
+                    searchCache[q] = html
                     return html
                 }
             } catch (e: Exception) {
