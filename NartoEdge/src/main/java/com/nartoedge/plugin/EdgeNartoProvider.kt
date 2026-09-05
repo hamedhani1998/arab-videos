@@ -357,21 +357,23 @@ class EdgeNartoProvider : MainAPI() {
                 any = true
             }
 
-            // v7 (fix "وفي جوده 1080 اختفت"): the site lists every quality and the user WANTS them
-            // all visible — but the shortmax tokens expire to 410 within minutes. Winning hybrid:
-            //   1) "كامل" = the narto proxy (stream-e1.narto-drama.com/e/m/{jwt}) ONLY, and only
-            //      when the host is REALLY the proxy. The fatal logcat proved direct_play_url can
-            //      ITSELF be a shortmax-stream token (which 410s) — so we never label a shortmax
-            //      URL "كامل" (that made the player auto-select a dead link = "لا يستجيب").
-            //   2) EVERY multi_resolutions quality as its own labelled link (1080p/720p/480p),
-            //      highest-first — the full real set is back. Tokens may 410 if tapped minutes
-            //      later (site-inherent: they re-mint at play time), but the always-alive "كامل"
-            //      proxy is first, so the player always auto-selects a responsive link.
+            // v8 (fix "افحص المصدرين واصلحهما بالكامل"): live API audit on 2026-09-05 showed the
+            // source changed hosts AGAIN — today it returns a SINGLE playable URL in
+            // direct_play_url / play_url (no fixed host): the probe hits were
+            //   - https://melolo2.narto-drama.com/{token}       -> video/mp4 (verb/dubs, HTTP 200)
+            //   - https://v3.tiktokcdn.com/...mime_type=video_mp4  -> video/mp4 (subbed, HTTP 200)
+            //   - https://v-a.idrama.video/...                -> video/* (403 from curl, works in app)
+            // and STARTING NOW multi_resolutions = [] and multi_subtitles = [] for every probed
+            // work (the per-quality list is GONE from the API — the site serves a single file).
+            //
+            // v7 was therefore broken: it gated "كامل" on host.startsWith("stream-e1") and filled
+            // the quality list from multi_resolutions — both now false/empty, so loadLinks emitted
+            // NOTHING. The correct universal rule: emit the API's direct/play URL as-is ("كامل"),
+            // whatever host it is (TikTok CDN, melolo2, idrama…), because the API hands us the
+            // live signed file. Only skip hosts we KNOW are dead, and surface multi_resolutions
+            // when the API does include them (some works/servers still do).
             val resolutions = edge.multiResolutions.orEmpty()
                 .filter { !it.streamUrl.isNullOrBlank() }
-
-            fun proxyHost(u: String): String =
-                u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
 
             fun proxyQuality(u: String?): String {
                 val s = u ?: return "480p"
@@ -388,35 +390,22 @@ class EdgeNartoProvider : MainAPI() {
                 return if (m == null) "480p" else m.groupValues[1] + "p"
             }
 
-            // 1) Always-live proxy first — "كامل", but ONLY when it's the real proxy host.
+            // 1) "كامل" = the API's direct/play URL, whatever live signed host it is today.
             for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
                 if (u.isBlank()) continue
-                if (proxyHost(u).startsWith("stream-e1")) {
-                    emit(u, "كامل", proxyQuality(u))
-                }
+                emit(u, "كامل", proxyQuality(u))
+                break   // one fresh live source is all the current API gives; don't stack
             }
 
-            // 2) Every real quality as its own labelled link (highest first) — 1080/720/480 restored.
+            // 2) If the API still returns real per-quality tokens, surface them too.
             for (r in resolutions.sortedByDescending { it.resolution ?: 0 }) {
                 val u = r.streamUrl ?: continue
                 val q = rendQ(r)
                 emit(u, q, q)
             }
 
-            // Fallback: if even proxy + tokens yielded nothing, surface the highest token so the
+            // Fallback: if even that yielded nothing, surface the highest token so the
             // player has SOMETHING (may 410 later, but never hand back an empty list).
-            if (emitted.isEmpty()) {
-                val best = resolutions.maxByOrNull { it.resolution ?: 0 } ?: resolutions.firstOrNull()
-                val masterUrl = best?.streamUrl
-                if (!masterUrl.isNullOrBlank()) {
-                    val labels = resolutions.filter { it.streamUrl == masterUrl }.mapNotNull { it.label }
-                    val label = if (labels.isEmpty()) "جودة متعددة" else "جودة متعددة · " + labels.joinToString("/")
-                    emit(masterUrl, label, "1080p")
-                }
-            }
-
-            // Fallback: if even that yielded nothing (no proxy, top token dead), surface whatever
-            // multi-res is left (shouldn't happen, but never hand back an empty list).
             if (emitted.isEmpty()) {
                 android.util.Log.e("EdgeNarto", "loadLinks no qualities emitted (all died?) slug=$slug")
             }
