@@ -216,7 +216,23 @@ class NartoDramaProvider : MainAPI() {
             // directly to re-parse a text body is NOT reliably on the plugin classpath and made the
             // detail page fail after v8. Detail is a low-CF path; keep it on the direct mainUrl
             // form like v7. (Single-domain now — no failover anywhere.)
-            val doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).document
+            // edge occasionally returns TRANSIENT 502 on a detail page (verified live: same slug
+            // 502 then 200 on retry). Retry ONCE so an intermittent bad-gateway doesn't show the
+            // user a dead detail page — the retry is on the SAME domain, ~1s apart.
+            var doc: org.jsoup.nodes.Document? = null
+            var attempt = 0
+            while (attempt < 2 && doc == null) {
+                attempt++
+                try {
+                    doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).document
+                } catch (e: Exception) {
+                    android.util.Log.e("NartoDrama", "load attempt=$attempt/2 slug=$slug error=${e.message?.take(80)}", e)
+                    if (attempt < 2) {
+                        try { Thread.sleep(1000) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
+                    }
+                }
+            }
+            if (doc == null) return null
             android.util.Log.e("NartoDrama", "load slug=$slug fetchMs=${System.currentTimeMillis() - t0} eps=" + doc.select("div.episode-list a.episode-item").size)
 
             val title = doc.selectFirst("h1")?.text()?.trim()
@@ -391,6 +407,74 @@ class NartoDramaProvider : MainAPI() {
                 any = true
             }
 
+            // Quick liveness probe: a backend token link may be dead on arrival (HTTP 410/403
+            // expired), and listing it just makes the player pick a link that errors. Do a fast
+            // HEAD (falling back to a range GET) with a tight timeout; treat 2xx/3xx as live.
+            fun isLive(u: String): Boolean {
+                return try {
+                    var code = -1
+                    var conn: java.net.HttpURLConnection? = null
+                    try {
+                        conn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+                        conn.connectTimeout = 2500
+                        conn.readTimeout = 2500
+                        conn.instanceFollowRedirects = true
+                        conn.setRequestProperty("User-Agent", UA)
+                        conn.setRequestProperty("Referer", nartoOrigin)
+                        // Many token servers reject HEAD; send a range GET and just read the status
+                        // + first byte, then abort — cheapest way to distinguish live vs expired.
+                        conn.requestMethod = "GET"
+                        conn.setRequestProperty("Range", "bytes=0-1")
+                        code = conn.responseCode
+                        if (code in 200..399) {
+                            try { conn.inputStream.read() } catch (e: Exception) {}
+                        }
+                    } finally {
+                        conn?.disconnect()
+                    }
+                    code in 200..399
+                } catch (e: Exception) { false }
+            }
+
+            // Group the per-quality token links, dedupe by URL (one master may back several labels).
+            val resolutions = edge.multiResolutions.orEmpty()
+                .filter { !it.streamUrl.isNullOrBlank() }
+            val distinctUrls = resolutions.map { it.streamUrl!! }.distinct()
+
+            // Probe every distinct quality link concurrently (parallel threads, ~2.5s timeout each)
+            // so the WORKING qualities surface FIRST and the dead 410/403 tokens are dropped —
+            // matching "اجعل الجودات المتعدده الذي تعمل اول خيار تشغيلي". This adds at most ~2.5s
+            // (single wall-clock wait) because the probes run in parallel, not serially.
+            val liveFlags = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+            if (distinctUrls.isNotEmpty()) {
+                val threads = distinctUrls.map { u ->
+                    Thread { liveFlags[u] = isLive(u) }
+                }
+                threads.forEach { it.start() }
+                threads.forEach { it.join(3500) }
+            }
+
+            // WORKING quality links FIRST, at their true quality.
+            val liveOnes = mutableListOf<Triple<String, String, String>>() // url, label, quality
+            val deadOnes = mutableListOf<Triple<String, String, String>>()
+            if (resolutions.isNotEmpty()) {
+                val byUrl = linkedMapOf<String, MutableList<String>>()
+                for (r in resolutions) {
+                    byUrl.getOrPut(r.streamUrl!!) { mutableListOf() }
+                        .add(r.label ?: "${r.resolution ?: 480}p")
+                }
+                for ((u, labels) in byUrl) {
+                    val res = resolutions.firstOrNull { it.streamUrl == u }?.resolution
+                    val q = when (res) {
+                        1080 -> "1080p"
+                        720 -> "720p"
+                        540 -> "540p"
+                        else -> "480p"
+                    }
+                    val label = if (labels.size == 1) labels[0] else labels.joinToString("/")
+                    (if (liveFlags[u] == true) liveOnes else deadOnes).add(Triple(u, label, q))
+                }
+            }
             // True resolution of the stream-e1 proxy URI, decoded from the JWT src field it wraps.
             // A signed URL keeps its quality as a `_1080/_720/_480` folder under .m3u8 — so the
             // label can show the REAL quality instead of a made-up "1080p" (the whole episode is
@@ -406,40 +490,22 @@ class NartoDramaProvider : MainAPI() {
             }
             val proxyQ = proxyQuality(edge.directPlayUrl)
 
-            // PRIMARY links FIRST — the narto-local proxies the site actually plays.
-            // play_url (كامل) and direct_play_url (رابط مباشر) are usually the same signed proxy;
-            // dedupe by URL so the list doesn't show two copies of one working link, and preserve
-            // the play-first / direct-second naming when they DO differ.
+            // Emit order = what the user asked: the WORKING multi-quality links FIRST, then the
+            // local proxies (كامل / رابط مباشر) as a safe fallback for when all token links died.
+            // Dead 410/403 tokens are NOT emitted (they'd just be dead first taps).
+            for ((u, label, q) in liveOnes) emit(u, label, q)
             var first = true
             for (u in listOfNotNull(edge.playUrl, edge.directPlayUrl).distinct()) {
                 emit(u, if (first) "كامل" else "رابط مباشر", proxyQ)
                 first = false
             }
-
-            // FALLBACK links — the per-quality backend tokens. Dedupe by URL (one master may back
-            // several labels) and surface each distinct source as ONE link so the list isn't 3
-            // copies. These may be expired (the site's own player hits this too) but a freshly
-            // refreshed token sometimes works, and a fetched master is still honest HLS.
-            val resolutions = edge.multiResolutions.orEmpty()
-                .filter { !it.streamUrl.isNullOrBlank() }
-            if (resolutions.isNotEmpty()) {
-                val byUrl = linkedMapOf<String, MutableList<String>>()
-                for (r in resolutions) {
-                    val u = r.streamUrl!!
-                    byUrl.getOrPut(u) { mutableListOf() }
-                        .add(r.label ?: "${r.resolution ?: 480}p")
-                }
-                for ((u, labels) in byUrl) {
-                    val label = if (labels.size == 1) labels[0] else labels.joinToString("/")
-                    val res = resolutions.firstOrNull { it.streamUrl == u }?.resolution
-                    val q = when (res) {
-                        1080 -> "1080p"
-                        720 -> "720p"
-                        540 -> "540p"
-                        else -> "480p"
-                    }
-                    emit(u, label, q)
-                }
+            // Last resort only: if every quality is dead AND there's no proxy, still surface the
+            // multi-res links so the user can try a manually-refreshed token.
+            if (liveOnes.isEmpty() && edge.playUrl.isNullOrBlank() && edge.directPlayUrl.isNullOrBlank()) {
+                for ((u, label, q) in deadOnes) emit(u, label, q)
+                android.util.Log.e("NartoDrama", "loadLinks only dead multi-res available (all 410/403), surfacing anyway slug=$slug")
+            } else if (deadOnes.isNotEmpty()) {
+                android.util.Log.e("NartoDrama", "loadLinks dropped ${deadOnes.size} dead quality links slug=$slug")
             }
 
             // 3) MULTI-AUDIO as TRACKS, not links. The user wants the site's multiple audio tracks to
