@@ -221,14 +221,16 @@ class NartoDramaProvider : MainAPI() {
             // user a dead detail page — the retry is on the SAME domain, ~1s apart.
             var doc: org.jsoup.nodes.Document? = null
             var attempt = 0
-            while (attempt < 2 && doc == null) {
+            while (attempt < 3 && doc == null) {
                 attempt++
                 try {
-                    doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).document
+                    doc = app.get("$mainUrl/detail/watch/$slug", referer = nartoOrigin, headers = mapOf("User-Agent" to UA), timeout = 20000L).document
                 } catch (e: Exception) {
-                    android.util.Log.e("NartoDrama", "load attempt=$attempt/2 slug=$slug error=${e.message?.take(80)}", e)
-                    if (attempt < 2) {
-                        try { Thread.sleep(1000) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
+                    android.util.Log.e("NartoDrama", "load attempt=$attempt/3 slug=$slug error=${e.message?.take(80)}", e)
+                    // Some slow slugs take 12-19s to build; wait a bit longer between retries so an
+                    // intermittent 502/timeout (edge upstream) doesn't blank the whole detail page.
+                    if (attempt < 3) {
+                        try { Thread.sleep(1500) } catch (ie: InterruptedException) { Thread.currentThread().interrupt() }
                     }
                 }
             }

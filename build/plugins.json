@@ -17,7 +17,7 @@
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoDrama.cs3",
     "status": 1,
-    "version": 19,
+    "version": 20,
     "name": "NartoDrama",
     "internalName": "NartoDrama",
     "authors": ["hamedhani1998"],
@@ -27,7 +27,7 @@
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-58bac6c81fabbeb84169e21085a0e2b4987e63fbfaccb3e026b2f5a086a408bd"
+    "fileHash": "sha256-d3f48bbd48281fd2c4f51722c7cf197e165ac3b33a2f9ea73dffe13972d3fe7f"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ShortTV.cs3",
