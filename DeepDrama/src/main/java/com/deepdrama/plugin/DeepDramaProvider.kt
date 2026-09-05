@@ -201,6 +201,7 @@ class DeepDramaProvider : MainAPI() {
         resolveCache["vidaraa:$embedUrl"]?.let { return it }
         val filecode = vidaraaFilecode(embedUrl) ?: return ServerResolved("vidaraa", null, emptyList(), emptyList(), null)
         var streamUrl: String? = null
+        var directMp4: String? = null
         var subs = emptyList<SubtitleTrack>()
         try {
             val body = mapper.writeValueAsString(mapOf("filecode" to filecode, "device" to "web"))
@@ -229,12 +230,22 @@ class DeepDramaProvider : MainAPI() {
             }
         } catch (_: Exception) { streamUrl = null }
 
-        // جودات vidaraa من الـ master (روابط index_XXX.m3u8 — playlists صحيحة، آمنة للتشغيل)
+        // vidaraa يخدم شكلين مختلفين بحسب الفيديو:
+        //   1) HLS master (~p1-*.s1q2105.com/hls/.../master.m3u8?token=) — نقسم الجودات النسبية.
+        //   2) ملف mp4 مباشر (streamix.so/uploads/video_*.mp4) — ليس HLS إطلاقًا.
+        // التمييز بالامتداد حتى لا نمرّر mp4 كنوع M3U8 فينكسر المشغّل، ولا نقرأ mp4 كـ playlist.
         var renditions = emptyList<ServerRendition>()
-        if (streamUrl != null) {
+        val su = streamUrl ?: ""
+        val isDirectMp4 = su.lowercase().let {
+            it.contains(".mp4") || it.contains(".m4v") || it.contains("mime_type=video_mp4")
+        }
+        if (isDirectMp4) {
+            directMp4 = su
+            streamUrl = null
+        } else if (su.isNotBlank()) {
             try {
-                val base = streamUrl.substringBeforeLast('/') + "/"
-                val masterText = app.get(streamUrl, headers = headers(), referer = "https://vidaraa.cc/").text
+                val base = su.substringBeforeLast('/') + "/"
+                val masterText = app.get(su, headers = headers(), referer = "https://vidaraa.cc/").text
                 renditions = parseVidaraaMaster(masterText, base)
             } catch (_: Exception) { renditions = emptyList() }
         }
@@ -244,7 +255,7 @@ class DeepDramaProvider : MainAPI() {
             hls = streamUrl,
             renditions = renditions,
             subtitles = subs,
-            directVideo = null,
+            directVideo = directMp4,
         )
         resolveCache["vidaraa:$embedUrl"] = resolved
         return resolved
