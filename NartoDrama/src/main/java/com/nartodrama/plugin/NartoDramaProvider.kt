@@ -167,12 +167,13 @@ open class NartoBaseProvider : MainAPI() {
         }
     }
 
-    // v25: fetch a /search page. Prefer MAIN_HOST for keyword feeds (measured faster for this
-    // route), falling back to this provider's own mainUrl if MAIN_HOST fails — so a 502 or a
-    // slow edge upstream never blanks the home screen.
+    // v28: EACH source searches on ITS OWN domain first (its own mainUrl), so "Edge Narto Drama"
+    // searches edge.narto-drama.com and "Narto Drama" searches narto-drama.com — the user asked
+    // for each source to stay on its own domain. Only if that host fails do we try the sibling,
+    // purely as a resilience net so a 502/slow host never blanks the list.
     private suspend fun fetchSearch(q: String): String? {
         val urlEncQ = java.net.URLEncoder.encode(q, "UTF-8")
-        val hosts = if (mainUrl == MAIN_HOST) listOf(MAIN_HOST) else listOf(MAIN_HOST, mainUrl)
+        val hosts = if (mainUrl == MAIN_HOST) listOf(MAIN_HOST) else listOf(mainUrl, MAIN_HOST)
         for (h in hosts) {
             try {
                 val html = app.get("$h/search?lang=ar-SA&q=$urlEncQ", referer = nartoOrigin, headers = mapOf("User-Agent" to UA)).text
@@ -369,18 +370,11 @@ open class NartoBaseProvider : MainAPI() {
     }
 
     private suspend fun loadRefresh(slug: String, ep: String): EdgeResponse? {
-        // Try this provider's OWN mainUrl first (each source knows its fast host), then the other.
-        val self = fetchRefresh(slug, ep, mainUrl)
-        if (self != null) return self
-        val other = if (mainUrl.contains("edge")) MAIN_HOST else "https://edge.narto-drama.com"
-        android.util.Log.e("NartoDrama", "fetchRefresh $mainUrl dead -> fallback $other slug=$slug ep=$ep")
-        val otherEdge = fetchRefresh(slug, ep, other)
-        if (otherEdge != null) return otherEdge
-        // Both hosts exhausted (each waited its own bounded cooldown once) — a final short sweep
-        // of the fast host only, so a just-cleared per-episode gate still yields links without
-        // blocking much longer.
-        android.util.Log.e("NartoDrama", "fetchRefresh both hosts exhausted -> final sweep slug=$slug ep=$ep")
-        try { Thread.sleep(1200) } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
+        // v28: EACH source stays on ITS OWN domain only — no fallback to the other provider's host.
+        // The user asked explicitly: "سوّي كل مصدر الدومين الخاص به" (each source its own domain).
+        // So "Edge Narto Drama" always fetches from edge.narto-drama.com and "Narto Drama" always
+        // from narto-drama.com — never hopping to the sibling domain. fetchRefresh already retries
+        // transient errors/cooldowns on the SAME host, which is plenty for per-episode resilience.
         return fetchRefresh(slug, ep, mainUrl)
     }
 

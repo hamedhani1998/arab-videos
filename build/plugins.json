@@ -17,17 +17,17 @@
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoDrama.cs3",
     "status": 1,
-    "version": 27,
+    "version": 28,
     "name": "NartoDrama",
     "internalName": "NartoDrama",
     "authors": ["hamedhani1998"],
     "description": "Narto Drama - مسلسلات دراما مترجمة",
-    "fileSize": 36259,
+    "fileSize": 35499,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-bd291ec8d43e932a86a172b66baef799ae43acfec24c18c61b372a91f6f902ee"
+    "fileHash": "sha256-2f5087337696659f85ff17ff19ba753b4da4cafdd8a4197f36f3d365ba7da304"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ShortTV.cs3",
