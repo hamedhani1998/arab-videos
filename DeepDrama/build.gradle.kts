@@ -2,7 +2,7 @@ android {
     namespace = "com.deepdrama.plugin"
 }
 
-version = 12
+version = 13
 
 cloudstream {
     description = "Deep Drama - مسلسلات دراما عربية مترجمة"

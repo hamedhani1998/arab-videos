@@ -1,6 +1,7 @@
 package com.deepdrama.plugin
 
 import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.lagradost.cloudstream3.*
@@ -97,7 +98,7 @@ class DeepDramaProvider : MainAPI() {
         val subtitles: List<SubtitleTrack>,
         val directVideo: String?,       // mp4 مباشر (Rumble فقط)
     )
-    private data class ServerRendition(val url: String, val height: Int)
+    private data class ServerRendition(val url: String, val height: Int, val bandwidth: Long = 0)
     // ملف ترجمة: اسم اللغة + رابط .vtt.
     // تمريره برابطه المباشر (كما في v4 الذي أثبت العرض الصحيح). لا نستخدم inline/data:
     // لأن مشغّل التطبيق لا يعرضها (أخفى الترجمة كليًا في v6).
@@ -109,22 +110,55 @@ class DeepDramaProvider : MainAPI() {
 
     // ---------- Rumble ----------
 
-    /** يحلل الجودات من master playlist (Rumble: روابط مطلقة http). */
+    /**
+     * يستخرج كائن JSON مُغلق بالأقواس يبدأ بعد المفتاح مباشرة (مثلاً `"u":{...}`)
+     * من نص يحتوي JSON مضغوط، بنطاق تطابق الأقواس — أأمن من قص سماكة ثابتة.
+     */
+    private fun extractJsonObject(text: String, key: String): JsonNode? {
+        val idx = text.indexOf(key)
+        if (idx < 0) return null
+        val start = text.indexOf('{', idx)
+        if (start < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        for (i in start until text.length) {
+            val c = text[i]
+            if (inStr) {
+                when {
+                    esc -> esc = false
+                    c == '\\' -> esc = true
+                    c == '"' -> inStr = false
+                }
+                continue
+            }
+            when (c) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) {
+                        return try { mapper.readTree(text.substring(start, i + 1)) } catch (_: Exception) { null }
+                    }
+                }
+                '"' -> inStr = true
+            }
+        }
+        return null
+    }
+
+    /** يحلل الجودات من master Rumble (روابط مطلقة hugh.cdn تستغني عن Rumble r_file). */
     private fun parseRumbleMaster(master: String): List<ServerRendition> {
         val out = mutableListOf<ServerRendition>()
         val lines = master.lines()
         for (i in 0 until lines.size - 1) {
             val inf = lines[i].trim()
             if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
-            // Rumble يستخدم chunklists (r_file=...) غير موثوقة وقت التشغيل؛ نتجاهلها.
-            // نأخذ فقط الـ masters التكيفية الكاملة إن وُجدت — لكن Rumble لا يوفرها،
-            // لذا نعود لقراءة الـ master نفسه فقط (لا نخرج جودات تشغيل منفصلة).
             val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull()
-            if (height != null) {
-                val url = lines[i + 1].trim()
-                if (url.startsWith("http://") || url.startsWith("https://")) {
-                    out.add(ServerRendition(url, height))
-                }
+                ?: continue
+            val bw = Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val url = lines[i + 1].trim()
+            if (url.startsWith("http")) {
+                out.add(ServerRendition(url, height, bw))
             }
         }
         return out.distinctBy { it.url }
@@ -135,35 +169,42 @@ class DeepDramaProvider : MainAPI() {
         resolveCache["rumble:$embedUrl"]?.let { return it }
         val html = app.get(embedUrl, headers = headers()).text
         val cleaned = html.replace("\\/", "/")
-        val hls = Regex("""https://rumble\.com/[^"'\s<>]*?/playlist\.m3u8""").find(cleaned)?.value
-        val mp4 = Regex("""https://hugh\.cdn\.rumble\.cloud[^"'\s<>]*?\.mp4""").find(cleaned)?.value
-        // الترجمات: Rumble يعرضها في كائن "cc":{lang:{language,path(.vtt)}}.
+
+        // المصدر الحقيقي الكامل داخل كائن `u`:
+        //   u.hls.url = https://rumble.com/hls-vod/{id}/playlist.m3u8  ← adaptive master (الجودة كلها)
+        //   u.timeline.url = .../Faa.mp4 (180x320)                       ← مجرد معاينة صغيرة، ليست الفيلم
+        //   u.tar = .../baa.tar?r_file=chunklist.m3u8 (360x640 + audio)  ← الأساس القابل للتشغيل
+        val uNode = extractJsonObject(cleaned, "\"u\"")
+        val hls = uNode?.get("hls")?.get("url")?.asText()?.takeIf { it.isNotBlank() }
+
+        // الترجمات: Rumble يقدّم كائن "cc":{lang:{language,path}} أو مصفوفة [] (بلا ترجمة).
         val subs = mutableListOf<SubtitleTrack>()
-        try {
-            val ccIdx = cleaned.indexOf("\"cc\"")
-            if (ccIdx >= 0) {
-                val ccStart = cleaned.indexOf('{', ccIdx)
-                val ccNode = mapper.readTree(cleaned.substring(ccStart, cleaned.length.coerceAtMost(ccStart + 4000)))
-                if (ccNode != null && ccNode.isObject) {
-                    ccNode.fields().forEach { (lang, info) ->
-                        val path = info.get("path")?.asText()?.takeIf { it.isNotBlank() }
-                        val langName = info.get("language")?.asText().orEmpty()
-                        if (path != null) {
-                            subs.add(SubtitleTrack("${langName.ifBlank { lang }} (Rumble)", path))
-                        }
-                    }
+        val ccNode = extractJsonObject(cleaned, "\"cc\"")
+        if (ccNode != null) {
+            if (ccNode.isObject) {
+                ccNode.fields().forEach { (lang, info) ->
+                    val path = info.get("path")?.asText()?.takeIf { it.isNotBlank() }
+                        ?: return@forEach
+                    val langName = info.get("language")?.asText().orEmpty()
+                    subs.add(SubtitleTrack("${langName.ifBlank { lang }} (Rumble)", path))
                 }
             }
-        } catch (_: Exception) { /* لا توجد ترجمة لهذا الفيديو */ }
+            // مصفوفة [] = لا ترجمة؛ نتجاهل.
+        }
 
-        // Rumble: لا نجعل الجودات الفردية خيارات تشغيل (chunklists غير موثوقة)
-        // — نقدم الـ master التكيفي فقط كخيار فيديو آمن، مع mp4.
+        // جودات Rumble: نسأل الـ master التكيفي نفسه (يُبثّ كما هو، بروابطه المطلقة).
+        val renditions = if (hls != null) {
+            try { parseRumbleMaster(app.get(hls, headers = headers(), referer = embedUrl).text) }
+            catch (_: Exception) { emptyList() }
+        } else emptyList()
+
+        // ملاحظة: لا نستخدم timeline.mp4 (180x320 معاينة) بأي حال — ليس بالفيلم الكامل.
         val resolved = ServerResolved(
             name = "Rumble",
             hls = hls,
-            renditions = emptyList(),  // الجودات الفردية غير موثوقة عند Rumble
+            renditions = renditions,
             subtitles = subs,
-            directVideo = mp4,
+            directVideo = null,  // لا ملف mp4 كامل مباشر عند Rumble — الصحيح هو الـ HLS.
         )
         resolveCache["rumble:$embedUrl"] = resolved
         return resolved
@@ -184,11 +225,12 @@ class DeepDramaProvider : MainAPI() {
             val inf = lines[i].trim()
             if (!inf.startsWith("#EXT-X-STREAM-INF")) continue
             val height = Regex("""RESOLUTION=\d+x(\d+)""").find(inf)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            val bw = Regex("""BANDWIDTH=(\d+)""").find(inf)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
             var url = lines[i + 1].trim()
             if (url.isBlank() || url.startsWith("#")) continue
             // الروابط نسبية (index_1080x1920.m3u8?token=...) — نحلها مقابل مجلد master
             if (!url.startsWith("http")) url = masterBase + url
-            out.add(ServerRendition(url, height))
+            out.add(ServerRendition(url, height, bw))
         }
         return out.distinctBy { it.height }
     }
@@ -434,7 +476,9 @@ class DeepDramaProvider : MainAPI() {
     }
 
     /**
-     * يبثّ خيارات خادم واحد: master تكيفي + جودات فردية + ترجمات + صوت.
+     * يبثّ خيارات خادم واحد: master تكيفي + جودات فردية (كل جودة يوفّرها الموقع) +
+     * فيديو مباشر (إن وُجد فعلاً) + ترجمات كل لغة.
+     * لا نكرّر نقطة جودة واحدة (إن كانت الجودات مفردة) — الـ master وحده يكفي.
      */
     private suspend fun emitServer(
         server: ServerResolved,
@@ -444,37 +488,52 @@ class DeepDramaProvider : MainAPI() {
     ) {
         val tag = server.name
         val master = server.hls ?: server.renditions.maxByOrNull { it.height }?.url
+        val renditions = server.renditions.sortedBy { it.height }
 
         // 1) الـ master التكيفي — الخيار المضمون الذي يشمل كل الجودات.
         if (master != null) {
-            val max = server.renditions.maxOfOrNull { it.height } ?: 1080
+            val max = renditions.maxOfOrNull { it.height } ?: 1080
             callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · جميع الجودات", master, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName("${max}p")
                 this.headers = headers()
             })
         }
 
-        // 2) الجودات الفردية (مثل الموقع). vidaraa يوفر playlists صحيحة (آمنة).
-        server.renditions.sortedBy { it.height }.forEach { r ->
-            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag ${r.height}p", r.url, ExtractorLinkType.M3U8) {
+        // 2) الجودات الفردية — كل ما يعرضه الموقع.
+        //    vidaraa: playlists صحيحة بجودات مختلفة.
+        //    Rumble: واحد أو اثنان (قد يختلفان بالبت-ريت لا بالقياس) — نعرض كلًّا منها.
+        renditions.forEachIndexed { idx, r ->
+            val bw = if (r.bandwidth > 0) " · ${(r.bandwidth / 1000)}k" else ""
+            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag ${r.height}p$bw", r.url, ExtractorLinkType.M3U8) {
                 this.quality = getQualityFromName("${r.height}p")
                 this.headers = headers()
             })
         }
 
-        // 3) فيديو مباشر (mp4) إن وُجد (Rumble).
+        // 3) فيديو مباشر (mp4) إن وُجد فعلاً وقابلاً للتشغيل.
+        //    vidaraa: بعض الفيديوات تُخدم كـ mp4 مباشر من streamix.so. هذا النطاق
+        //    معطّل حاليًا (521)، لكنه المصدر الوحيد لذلك الفيديو في vidaraa؛ نعرضه
+        //    فقط إذا لم يتوفر HLS بديل (البديل دائمًا هو Rumble). إذا وُجد HLS
+        //    إلى جانبه فنتجاهل المعطّل ولا نعرض رابطًا ميتًا.
+        //    Rumble لا يوفر mp4 كاملاً (المعاينة 180x320 ليست الفيلم) فلا نصدّره
+        //    (directVideo = null دائمًا عند Rumble).
         server.directVideo?.let { mp4 ->
-            callback(newExtractorLink(name, "$tag MP4", mp4, ExtractorLinkType.VIDEO) {
-                this.quality = getQualityFromName("720p")
-                this.headers = headers()
-            })
+            val hasHls = server.hls != null || server.renditions.isNotEmpty()
+            if (hasHls) {
+                // يوجد HLS صحيحة تعمل — لا نعرض mp4 معطلاً.
+            } else {
+                val q = Regex("""/(\d{3,4})p/""").find(mp4)?.groupValues?.get(1)
+                    ?: if (mp4.contains("1080")) "1080" else if (mp4.contains("720")) "720" else "480"
+                callback(newExtractorLink(name, "$tag MP4", mp4, ExtractorLinkType.VIDEO) {
+                    this.quality = getQualityFromName("${q}p")
+                    this.headers = headers()
+                })
+            }
         }
 
         // 4) ملفات الترجمة (كل لغة يوفّرها الخادم). نمرّرها برابطها المباشر برؤوس
         // قياسية صحيحة (User-Agent + Referer/Origin للخادم الصادر) حتى لا يردّ
-        // السيرفر بصفحة خطأ 403 تُعرض كرموز. (ملاحظة: محتوى ملفات .vtt عند
-        // المصدر الأعلى مضاعف-الترميز في كلا الخادمين؛ لا يمكن للـ plugin إعادة
-        // ترميزه لأنه لا يملك حقنَ محتوى ولا Context — انظر mojibakeDiagnosticNote.)
+        // السيرفر بصفحة خطأ 403 تُعرض كرموز.
         server.subtitles.forEach { sub ->
             try {
                 subtitleCallback(
@@ -525,6 +584,8 @@ class DeepDramaProvider : MainAPI() {
                     // نبثّ هذا الخادم فور حلّه، قبل الانتظار على الخادم الآخر —
                     // فيبدأ الفيديو بسرعة ولا ينتظر المحاولتين معاً.
                     emitServer(resolvedServer, resolved.isEmpty(), subtitleCallback, callback)
+                    // نعتبر الخادم "حُلّ" إذا قدّم شيئًا قابلًا للتشغيل: HLS أو جودات
+                    // أو mp4 مباشر (حتى لو معطلاً الآن، Rumble سيغطيه كبديل).
                     if (resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
                         resolvedServer.directVideo != null) {
                         resolved.add(resolvedServer)

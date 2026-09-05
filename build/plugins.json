@@ -122,17 +122,17 @@
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/DeepDrama.cs3",
     "status": 1,
-    "version": 12,
+    "version": 13,
     "name": "DeepDrama",
     "internalName": "DeepDrama",
     "authors": ["hamedhani1998"],
     "description": "Deep Drama - مسلسلات دراما عربية مترجمة",
-    "fileSize": 32138,
+    "fileSize": 34061,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-34242bdb6a3388a49b0c8ee899b8c2d83f470d13dd497cbaddc9a4364f170613"
+    "fileHash": "sha256-9ded9292319a2f9de5334a8820315f5b1bb5d6a0f56c3857d4118b66cff2848a"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/Reelree.cs3",
