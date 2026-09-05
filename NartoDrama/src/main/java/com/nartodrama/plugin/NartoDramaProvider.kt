@@ -44,6 +44,7 @@ private data class EdgeResponse(
     val ok: Boolean? = null,
     val message: String? = null,
     val canonical: String? = null,          // full canonical URL hint on slug_mismatch
+    @JsonProperty("retry_after_seconds") val retryAfterSeconds: Int? = null, // 429 cooldown: how long to wait
     @JsonProperty("direct_play_url") val directPlayUrl: String? = null, // may be HLS master OR direct MP4
     @JsonProperty("play_url") val playUrl: String? = null,
     @JsonProperty("multi_resolutions") val multiResolutions: List<EdgeResolution>? = null,
@@ -290,7 +291,20 @@ open class NartoBaseProvider : MainAPI() {
     // playback fetch tries MAIN first (with a couple of resilience retries), then falls back to
     // EDGE with an extended 60s timeout so it still works when edge is merely slow, not down.
     // Whichever host answers, we parse the SAME EdgeResponse shape.
+    //
+    // v23: the endpoint ALSO returns a transient per-episode cooldown (both on MAIN and edge —
+    //   they share the same server-side gate keyed by episode). Two message variants appear after a
+    //   refresh just ran for the SAME episode:
+    //     refresh_source_recently_failed   retry_after_seconds=45   after a failed refresh attempt
+    //     refresh_source_cooldown_active   retry_after_seconds=20   on further taps while cooling
+    //   Verified live: first tap of a fresh episode -> 200; a 2nd tap seconds later -> 429 cooldown.
+    //   In v22 this was the "BOTH sources broken" bug: opening the same episode in the two sources
+    //   (or tapping twice) hit the cooldown, and the provider treated the ok:false body as a
+    //   SUCCESS, hard-bailed in loadLinks, and surfaced no links. Now both cooldown messages are
+    //   RETRYABLE failures: we wait the endpoint's own retry_after_seconds (capped so a single
+    //   tap never blocks >~12s) and try again; only a persistent gate falls through to the other host.
     private suspend fun fetchRefresh(slug: String, ep: String, base: String): EdgeResponse? {
+        var waited = false
         var attempt = 0
         while (attempt < 2) {
             attempt++
@@ -301,8 +315,21 @@ open class NartoBaseProvider : MainAPI() {
                     timeout = 60000L
                 ).text
                 val edge = mapper.readValue(body, EdgeResponse::class.java)
-                // A JSON parse that lands on an explicit outage isn't a retry candidate.
-                // A successful read (even ok!=true with other messages) is final.
+                // A cooldown (either variant) is NOT a usable response — it has no play_url and is
+                // keyed per-episode, so wait the endpoint's own window (bounded) and retry it once.
+                if (edge.ok != true && (edge.message == "refresh_source_recently_failed" || edge.message == "refresh_source_cooldown_active")) {
+                    if (waited) {
+                        android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN persists host=$base slug=$slug ep=$ep retryAfter=${edge.retryAfterSeconds}")
+                        return null
+                    }
+                    waited = true
+                    val waitMs = ((edge.retryAfterSeconds ?: 15).coerceIn(4, 12)) * 1000L
+                    android.util.Log.e("NartoDrama", "fetchRefresh COOLDOWN host=$base slug=$slug ep=$ep waiting=${waitMs}ms")
+                    try { Thread.sleep(waitMs) } catch (e2: InterruptedException) { Thread.currentThread().interrupt() }
+                    continue
+                }
+                // Otherwise a successful read (including ok!=true with other non-contagious
+                // messages) is final — the caller decides whether it's usable.
                 return edge
             } catch (e: Exception) {
                 android.util.Log.e("NartoDrama", "fetchRefresh ERROR attempt=$attempt/2 host=$base slug=$slug ep=$ep", e)
@@ -320,7 +347,14 @@ open class NartoBaseProvider : MainAPI() {
         if (self != null) return self
         val other = if (mainUrl.contains("edge")) MAIN_HOST else "https://edge.narto-drama.com"
         android.util.Log.e("NartoDrama", "fetchRefresh $mainUrl dead -> fallback $other slug=$slug ep=$ep")
-        return fetchRefresh(slug, ep, other)
+        val otherEdge = fetchRefresh(slug, ep, other)
+        if (otherEdge != null) return otherEdge
+        // Both hosts exhausted (each waited its own bounded cooldown once) — a final short sweep
+        // of the fast host only, so a just-cleared per-episode gate still yields links without
+        // blocking much longer.
+        android.util.Log.e("NartoDrama", "fetchRefresh both hosts exhausted -> final sweep slug=$slug ep=$ep")
+        try { Thread.sleep(1200) } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
+        return fetchRefresh(slug, ep, mainUrl)
     }
 
     override suspend fun loadLinks(
@@ -341,9 +375,17 @@ open class NartoBaseProvider : MainAPI() {
                 return false
             }
 
-            // Explicit transient outage — surface a readable failure instead of a useless empty list.
-            // (Driven by the API's own message string, not by guessing.)
-            if (edge.ok != true && edge.message == "stream_temporarily_unavailable") return false
+            // Explicit transient outages — surface a readable failure instead of a useless empty list.
+            // (Driven by the API's own message string, not by guessing.) stream_temporarily_unavailable
+            // is a real upstream outage; the two per-episode cooldown variants are handled here too
+            // as an extra safety net (loadRefresh already spins on them, but if one ever slips through
+            // with no links, bail cleanly rather than emit garbage).
+            if (edge.ok != true && setOf(
+                    "stream_temporarily_unavailable",
+                    "refresh_source_recently_failed",
+                    "refresh_source_cooldown_active"
+                ).contains(edge.message)
+            ) return false
 
             // Canonical re-discovery: a requested slug may differ from the narto canonical one.
             if (edge.ok != true && edge.message == "slug_mismatch") {
@@ -582,20 +624,20 @@ open class NartoBaseProvider : MainAPI() {
 }
 
 // ---- The two Narto sources the user asked for ----
-//   1) "edge narto drama" — the open (no-CF) mirror, DEFAULT for browsing the native Arabic catalog.
-//   2) "https://narto-drama.com" — the main domain, the reliable host for playback refresh.
+//   1) "Edge Narto Drama" — the open (no-CF) mirror, DEFAULT for browsing the native Arabic catalog.
+//   2) "Narto Drama" — the main domain, the reliable host for playback refresh.
 // Both are separate MainAPI providers registered from NartoDramaPlugin.load(); both share the
 // logic in NartoBaseProvider. Each keeps a fixed mainUrl — no auto-failover between them.
 class NartoEdgeProvider(
     initialMainUrl: String = "https://edge.narto-drama.com"
 ) : NartoBaseProvider() {
-    override var name = "edge narto drama"
+    override var name = "Edge Narto Drama"
     override var mainUrl = initialMainUrl
 }
 
 class NartoMainProvider(
     initialMainUrl: String = "https://narto-drama.com"
 ) : NartoBaseProvider() {
-    override var name = "https://narto-drama.com"
+    override var name = "narto drama"
     override var mainUrl = initialMainUrl
 }
