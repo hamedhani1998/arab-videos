@@ -372,22 +372,12 @@ class EdgeNartoProvider : MainAPI() {
             // whatever host it is (TikTok CDN, melolo2, idrama…), because the API hands us the
             // live signed file. Only skip hosts we KNOW are dead, and surface multi_resolutions
             // when the API does include them (some works/servers still do).
-            val resolutions = edge.multiResolutions.orEmpty()
-                .filter { !it.streamUrl.isNullOrBlank() }
-
             fun proxyQuality(u: String?): String {
                 val s = u ?: return "480p"
                 val seg = s.trim().trimEnd('=').substringAfterLast('.')
                 val dec = try { java.net.URLDecoder.decode(seg, "UTF-8") } catch (e: Exception) { seg }
                 val q = Regex("""_(\d{3,4})p""").find(dec)?.groupValues?.get(1)
                 return if (q == null) "480p" else "${q}p"
-            }
-
-            fun rendQ(r: com.nartoedge.plugin.EdgeResolution): String {
-                val q = r.resolution
-                if (q != null && q > 0) return "${q}p"
-                val m = Regex("""(\d{3,4})p""").find(r.label ?: "")
-                return if (m == null) "480p" else m.groupValues[1] + "p"
             }
 
             // Decode a base64url JWT payload's "src" field (no signature verify — we only READ
@@ -434,12 +424,12 @@ class EdgeNartoProvider : MainAPI() {
                 break   // one fresh live source is all the current API gives; don't stack
             }
 
-            // 2) If the API still returns real per-quality tokens, surface them too.
-            for (r in resolutions.sortedByDescending { it.resolution ?: 0 }) {
-                val u = r.streamUrl ?: continue
-                val q = rendQ(r)
-                emit(u, q, q)
-            }
+            // NOTE: we deliberately do NOT emit multi_resolutions. On the live site those are
+            // shortmax-stream signed tokens that expire to HTTP 410 within minutes (device logcat:
+            // "Response code: 410 -> Source error" when the player selects a 1080p/720p/480p that
+            // came from multi_resolutions). Only "كامل" (the proxy) and the akamai qualities
+            // decoded from its jwt (emitAkamaiQualities above) are reliably alive. Emitting the
+            // multi_resolutions tokens lists qualities that look real but fail to play.
 
             // Fallback: if even that yielded nothing, surface the highest token so the
             // player has SOMETHING (may 410 later, but never hand back an empty list).
