@@ -41,6 +41,7 @@ class ReelreeProvider : MainAPI() {
         "platform/netshort/" to "منصة NetShort",
         "platform/dramabite/" to "منصة DramaBite",
         "platform/dramabox/" to "منصة DramaBox",
+        "platform/dramapops/" to "منصة DramaPops",
         "platform/reelshort/" to "منصة ReelShort",
         "platform/goodshort/" to "منصة GoodShort",
         "platform/shortmax/" to "منصة ShortMax",

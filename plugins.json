@@ -203,7 +203,7 @@
   "iconUrl": "https://reelree.com/wp-content/uploads/2026/08/cropped-Screenshot-2026-08-16-075556-192x192.png",
   "apiVersion": 1,
   "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
-  "fileSize": 23741,
+  "fileSize": 22697,
   "status": 1,
   "language": "ar",
   "authors": [
@@ -213,7 +213,7 @@
    "TvSeries",
    "Movie"
   ],
-  "version": 1,
+  "version": 2,
   "internalName": "Reelree",
   "description": "Reelree - مسلسلات دراما قصيرة عمودية مترجمة ومدبلجة",
   "url": "https://github.com/hamedhani1998/arab-videos/raw/refs/heads/main/build/Reelree.cs3",

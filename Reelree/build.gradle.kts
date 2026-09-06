@@ -15,7 +15,7 @@ android {
     }
 }
 
-version = 1
+version = 2
 
 cloudstream {
     description = "إضافة Reelree - مسلسلات قصيرة مترجمة ومدبلجة"
