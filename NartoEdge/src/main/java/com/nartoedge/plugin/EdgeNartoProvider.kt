@@ -380,29 +380,34 @@ class EdgeNartoProvider : MainAPI() {
                 return if (q == null) "480p" else "${q}p"
             }
 
-            // Decode a base64url JWT payload's "src" field (no signature verify — we only READ
-            // the src the provider signed). Extracts "src":"<url>" via regex on the decoded text
-            // so we don't depend on an extra JSON lib. Returns null on any failure.
+            // Decode a JWT payload's "src" field robustly. Payload is base64url JSON
+            // (header.payload[.sig]); the JSON text may contain escape sequences (still valid
+            // JSON), so decode the bytes then use the ObjectMapper to extract "src" — regexes
+            // on the raw string fail on escaped/unicode payloads (mydramawave's are escaped).
             fun jwtSrc(u: String): String? {
                 return try {
                     val jwt = u.substringAfter("/e/m/").substringBefore("?")
-                    val parts = jwt.split('.')
-                    if (parts.size < 2) return null
-                    val middle = parts[1].padEnd((parts[1].length + 3) / 4 * 4, '=')
-                    val dec = String(java.util.Base64.getUrlDecoder().decode(middle), Charsets.UTF_8)
-                    Regex("""\"src\"\s*:\s*\"([^\"]+)\"""").find(dec)?.groupValues?.get(1)
-                        ?.takeIf { it.startsWith("http") }
+                    val payloadB64 = jwt.substringAfter('.', "").substringBefore('.').takeIf { it.isNotBlank() }
+                        ?: return null
+                    val bytes = try {
+                        java.util.Base64.getUrlDecoder().decode(payloadB64)
+                    } catch (e: IllegalArgumentException) {
+                        java.util.Base64.getDecoder().decode(payloadB64.padEnd((payloadB64.length + 3) / 4 * 4, '='))
+                    }
+                    val text = try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { String(bytes, Charsets.ISO_8859_1) }
+                    mapper.readTree(text).get("src")?.asText()?.takeIf { it.startsWith("http") }
                 } catch (e: Exception) { null }
             }
 
-            // For shortmax/akamai works the API hands us a single "stream-e1/e/m/{jwt}" proxy that
-            // serves ONLY the quality baked into the jwt (usually 480p). The underlying storage
-            // host (akamai-static.shorttv.live) happily serves 480/720/1080 with the SAME uuid +
-            // auth_key (verified live HTTP 200 on all three). So after emitting the proxy as
-            // "كامل", decode the jwt's src and emit each real quality DIRECT from the storage host
-            // (no proxy) so the user gets the full quality list, not just 480.
-            suspend fun emitAkamaiQualities(proxyUrl: String) {
+            // Decode a proxy ("/e/m/{jwt}") into the real signed src the provider intended.
+            // The src is a normal HLS host (akamai-static.shorttv.live, video-v6.mydramawave.com,
+            // ...) — emitting that host directly avoids the nested-relative-proxy infinite spin.
+            suspend fun emitFromProxy(proxyUrl: String) {
                 val src = jwtSrc(proxyUrl) ?: return
+                if (!src.contains("/e/m/")) {
+                    emit(src, "كامل", proxyQuality(src))
+                }
+                // shortmax/akamai: same uuid serves 480/720/1080 with one auth_key (verified 200).
                 val m = Regex("""(.+?)_(\d{3,4})p/main\.m3u8(\?.*)""").find(src) ?: return
                 val base = m.groupValues[1]             // .../hls/{uuid}
                 val query = m.groupValues[3]            // ?auth_key=...
@@ -415,24 +420,39 @@ class EdgeNartoProvider : MainAPI() {
                 }
             }
 
-            // 1) "كامل" = the API's direct/play URL, whatever live signed host it is today.
-            for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
-                if (u.isBlank()) continue
+            // 1) "كامل" — prefer real CDN hosts over the /e/m/{jwt} proxy. A proxy's HLS has
+            // nested root-relative /e/m/{jwt} variant/segment URLs that many players can't
+            // resolve, spinning forever; the signed src host (or a direct m3u8/MP4 from the API)
+            // is what actually plays. Emit every direct/CDN candidate, then fall back to the
+            // proxy only if there are none (so we never hand back an empty list).
+            val isProxy = { u: String -> u.contains("/e/m/") }
+            val directs = listOfNotNull(edge.directPlayUrl, edge.playUrl)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !isProxy(it) }
+                .distinct()
+            val proxies = listOfNotNull(edge.playUrl, edge.directPlayUrl)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && isProxy(it) }
+                .distinct()
+
+            var directEmitted = 0
+            for (u in directs) {
+                if (directEmitted >= 2) break
                 emit(u, "كامل", proxyQuality(u))
-                // unlock the full quality list for shortmax/akamai proxy links
-                if (u.contains("/e/m/")) emitAkamaiQualities(u)
-                break   // one fresh live source is all the current API gives; don't stack
+                directEmitted++
+            }
+            if (directEmitted == 0) {
+                // No direct CDN host — last resort is the proxy; decode it to the real host.
+                val p = proxies.firstOrNull()
+                if (p != null) emitFromProxy(p)
             }
 
             // NOTE: we deliberately do NOT emit multi_resolutions. On the live site those are
-            // shortmax-stream signed tokens that expire to HTTP 410 within minutes (device logcat:
-            // "Response code: 410 -> Source error" when the player selects a 1080p/720p/480p that
-            // came from multi_resolutions). Only "كامل" (the proxy) and the akamai qualities
-            // decoded from its jwt (emitAkamaiQualities above) are reliably alive. Emitting the
-            // multi_resolutions tokens lists qualities that look real but fail to play.
+            // usually shortmax-stream signed tokens that expire to HTTP 410 within minutes (device
+            // logcat), or nested /e/m/{jwt} proxies that spin. The reliable sources are the direct
+            // CDN hosts (emitted above) and, for proxy-only works, the decoded src host from
+            // emitFromProxy.
 
-            // Fallback: if even that yielded nothing, surface the highest token so the
-            // player has SOMETHING (may 410 later, but never hand back an empty list).
             if (emitted.isEmpty()) {
                 android.util.Log.e("EdgeNarto", "loadLinks no qualities emitted (all died?) slug=$slug")
             }
