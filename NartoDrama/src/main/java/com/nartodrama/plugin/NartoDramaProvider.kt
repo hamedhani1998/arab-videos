@@ -389,10 +389,47 @@ class NartoDramaProvider : MainAPI() {
                 return if (m == null) "480p" else m.groupValues[1] + "p"
             }
 
+            // Decode a base64url JWT payload's "src" field (no signature verify — we only READ
+            // the src the provider signed). Extracts "src":"<url>" via regex on the decoded text
+            // so we don't depend on an extra JSON lib. Returns null on any failure.
+            fun jwtSrc(u: String): String? {
+                return try {
+                    val jwt = u.substringAfter("/e/m/").substringBefore("?")
+                    val parts = jwt.split('.')
+                    if (parts.size < 2) return null
+                    val middle = parts[1].padEnd((parts[1].length + 3) / 4 * 4, '=')
+                    val dec = String(java.util.Base64.getUrlDecoder().decode(middle), Charsets.UTF_8)
+                    Regex("""\"src\"\s*:\s*\"([^\"]+)\"""").find(dec)?.groupValues?.get(1)
+                        ?.takeIf { it.startsWith("http") }
+                } catch (e: Exception) { null }
+            }
+
+            // For shortmax/akamai works the API hands us a single "stream-e1/e/m/{jwt}" proxy that
+            // serves ONLY the quality baked into the jwt (usually 480p). The underlying storage
+            // host (akamai-static.shorttv.live) happily serves 480/720/1080 with the SAME uuid +
+            // auth_key (verified live HTTP 200 on all three). So after emitting the proxy as
+            // "كامل", decode the jwt's src and emit each real quality DIRECT from the storage host
+            // (no proxy) so the user gets the full quality list, not just 480.
+            suspend fun emitAkamaiQualities(proxyUrl: String) {
+                val src = jwtSrc(proxyUrl) ?: return
+                val m = Regex("""(.+?)_(\d{3,4})p/main\.m3u8(\?.*)""").find(src) ?: return
+                val base = m.groupValues[1]             // .../hls/{uuid}
+                val query = m.groupValues[3]            // ?auth_key=...
+                val baseQ = m.groupValues[2].toIntOrNull() ?: 480
+                val ordered = listOf(1080, 720, 480).filter { it >= baseQ || it == 480 }
+                    .sortedByDescending { it }
+                for (q in ordered) {
+                    val url = "${base}_${q}p/main.m3u8$query"
+                    emit(url, "${q}p", "${q}p")
+                }
+            }
+
             // 1) "كامل" = the API's direct/play URL, whatever live signed host it is today.
             for (u in listOfNotNull(edge.directPlayUrl, edge.playUrl).distinct()) {
                 if (u.isBlank()) continue
                 emit(u, "كامل", proxyQuality(u))
+                // unlock the full quality list for shortmax/akamai proxy links
+                if (u.contains("/e/m/")) emitAkamaiQualities(u)
                 break   // one fresh live source is all the current API gives; don't stack
             }
 
