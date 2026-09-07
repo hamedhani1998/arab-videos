@@ -411,15 +411,17 @@ class EdgeNartoProvider : MainAPI() {
                     emit(src, "كامل", proxyQuality(src))
                 }
                 // shortmax/akamai: same uuid serves 480/720/1080 with one auth_key (verified 200).
-                // Path is `{uuid}_{q}/main.m3u8` (no `p`), so match optional-p.
-                val m = Regex("""(.+?)_(\d{3,4})p?/main\.m3u8(\?.*)""").find(src) ?: return
+                // CRITICAL: path uses `{uuid}_{q}/main.m3u8` with NO `p` — verified live that
+                // `_720p`/`_1080p` return HTTP 403 while `_720`/`_1080` return 200. The label keeps
+                // the `p` for display but the URL must NOT contain it.
+                val m = Regex("""(.+?)_(\d{3,4})(?:p)?/main\.m3u8(\?.*)""").find(src) ?: return
                 val base = m.groupValues[1]             // .../hls/{uuid}
                 val query = m.groupValues[3]            // ?auth_key=...
                 val baseQ = m.groupValues[2].toIntOrNull() ?: 480
                 val ordered = listOf(1080, 720, 480).filter { it >= baseQ || it == 480 }
                     .sortedByDescending { it }
                 for (q in ordered) {
-                    val url = "${base}_${q}p/main.m3u8$query"
+                    val url = "${base}_${q}/main.m3u8$query"
                     emit(url, "${q}p", "${q}p")
                 }
             }
