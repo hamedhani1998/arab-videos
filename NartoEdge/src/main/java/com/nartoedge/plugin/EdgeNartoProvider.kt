@@ -411,7 +411,8 @@ class EdgeNartoProvider : MainAPI() {
                     emit(src, "كامل", proxyQuality(src))
                 }
                 // shortmax/akamai: same uuid serves 480/720/1080 with one auth_key (verified 200).
-                val m = Regex("""(.+?)_(\d{3,4})p/main\.m3u8(\?.*)""").find(src) ?: return
+                // Path is `{uuid}_{q}/main.m3u8` (no `p`), so match optional-p.
+                val m = Regex("""(.+?)_(\d{3,4})p?/main\.m3u8(\?.*)""").find(src) ?: return
                 val base = m.groupValues[1]             // .../hls/{uuid}
                 val query = m.groupValues[3]            // ?auth_key=...
                 val baseQ = m.groupValues[2].toIntOrNull() ?: 480
