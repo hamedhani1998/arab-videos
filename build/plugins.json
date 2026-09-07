@@ -17,32 +17,32 @@
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoDrama.cs3",
     "status": 1,
-    "version": 42,
+    "version": 43,
     "name": "NartoDrama",
     "internalName": "NartoDrama",
     "authors": ["hamedhani1998"],
     "description": "Narto Drama - مسلسلات دراما مترجمة",
-    "fileSize": 33791,
+    "fileSize": 36487,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-0556f9e6822a5122061d5e5e37f4e3f022477180b113890e26dbbc0f4f7935ef"
+    "fileHash": "sha256-7665a102b2f07f3a51ba233aaf1c38c3b815a305d0b6842b7bbffa07a9f72d4b"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/NartoEdge.cs3",
     "status": 1,
-    "version": 13,
+    "version": 14,
     "name": "NartoEdge",
     "internalName": "NartoEdge",
     "authors": ["hamedhani1998"],
     "description": "Edge Narto Drama - مسلسلات دراما مترجمة",
-    "fileSize": 33798,
+    "fileSize": 36502,
     "repositoryUrl": "https://github.com/hamedhani1998/arab-videos",
     "language": "ar",
     "tvTypes": ["TvSeries", "Movie"],
     "apiVersion": 1,
-    "fileHash": "sha256-8a58ea6f3da0edb6f4a41f685b2f02daad235d7ff5941eefefcbce6ac75a00df"
+    "fileHash": "sha256-dbfc9fc5c42bdebf730a6704077b0ae13fb93cffb5ae7535284560eecce41ef4"
   },
   {
     "url": "https://raw.githubusercontent.com/hamedhani1998/arab-videos/builds/ShortTV.cs3",

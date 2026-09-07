@@ -444,7 +444,19 @@ class EdgeNartoProvider : MainAPI() {
             var directEmitted = 0
             for (u in directs) {
                 if (directEmitted >= 2) break
-                emit(u, "كامل", proxyQuality(u))
+                // v43: on slow CDNs (shortmax-stream) a 1080 master's 1.7MB segments drain the
+                // buffer as fast as it fills ("plays a bit then spins"). Prefer the 480 token
+                // (740KB @ ~3s for a 10s segment) so the default "كامل" starts smooth; the
+                // multi_resolutions emissions below still give 1080/720 to the quality picker.
+                val picked = if (u.contains("shortmax-stream") && !u.contains("/e/m/")) {
+                    edge.multiResolutions
+                        ?.asSequence()
+                        ?.filter { it.streamUrl?.contains("shortmax-stream") == true }
+                        ?.minWithOrNull(compareBy { it.resolution ?: 1080 })
+                        ?.streamUrl
+                        ?.takeIf { it.isNotBlank() }
+                } else null
+                emit(picked ?: u, "كامل", picked?.let { proxyQuality(it) } ?: proxyQuality(u))
                 directEmitted++
             }
             if (directEmitted == 0) {
@@ -453,11 +465,23 @@ class EdgeNartoProvider : MainAPI() {
                 if (p != null) emitFromProxy(p)
             }
 
-            // NOTE: we deliberately do NOT emit multi_resolutions. On the live site those are
-            // usually shortmax-stream signed tokens that expire to HTTP 410 within minutes (device
-            // logcat), or nested /e/m/{jwt} proxies that spin. The reliable sources are the direct
-            // CDN hosts (emitted above) and, for proxy-only works, the decoded src host from
-            // emitFromProxy.
+            // v43: emit multi_resolutions too. Live audit 2026-09-07: the API server handed us
+            // THREE separate shortmax-stream signed tokens (1080/720/480) — all three returned
+            // HTTP 200 and played (masters + segments) even ~25 min after refresh. They are NOT
+            // the dead-410 tokens of older months. Emitting them restores the quality selector,
+            // and lets the player pick 480 on slow links (a 1080 segment is 1.7MB @ ~230KB/s
+            // stream → consumes buffer faster than it fills → PAUSED buffering dip; 480's 740KB
+            // @ 3.2s vs 10s play keeps well ahead). Only safe when the master we emit is NOT a
+            // nested /e/m/{jwt} proxy (which would spin) — so gate each on a real CDN host.
+            for (res in edge.multiResolutions.orEmpty()) {
+                val su = res.streamUrl?.trim().orEmpty()
+                if (su.isBlank() || su.contains("/e/m/")) continue
+                val label = res.label?.takeIf { it.isNotBlank() } ?: run {
+                    val r = res.resolution ?: 480
+                    "${r}p"
+                }
+                emit(su, label, label)
+            }
 
             if (emitted.isEmpty()) {
                 android.util.Log.e("EdgeNarto", "loadLinks no qualities emitted (all died?) slug=$slug")
