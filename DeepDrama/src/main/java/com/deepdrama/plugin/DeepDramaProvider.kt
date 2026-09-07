@@ -97,6 +97,8 @@ class DeepDramaProvider : MainAPI() {
         val renditions: List<ServerRendition>, // الجودات الفردية (اختياري)
         val subtitles: List<SubtitleTrack>,
         val directVideo: String?,       // mp4 مباشر (Rumble فقط)
+        val extraHls: List<ServerRendition> = emptyList(), // روابط HLS إضافية قابلة للتشغيل (مثل chunklist Rumble)
+        val altLabel: String = "",      // تسمية بديلة لوصف الرابط (مثل جودة tar)
     )
     private data class ServerRendition(val url: String, val height: Int, val bandwidth: Long = 0)
     // ملف ترجمة: اسم اللغة + رابط .vtt.
@@ -155,9 +157,21 @@ class DeepDramaProvider : MainAPI() {
         // المصدر الحقيقي الكامل داخل كائن `u`:
         //   u.hls.url = https://rumble.com/hls-vod/{id}/playlist.m3u8  ← adaptive master (الجودة كلها)
         //   u.timeline.url = .../Faa.mp4 (180x320)                       ← مجرد معاينة صغيرة، ليست الفيلم
-        //   u.tar = .../baa.tar?r_file=chunklist.m3u8 (360x640 + audio)  ← الأساس القابل للتشغيل
+        //   u.tar.url = .../baa.tar?r_file=chunklist.m3u8 (360x640)      ← HLS حقيقي يعمل دائمًا (200)
+        //   u.audio.url = .../Gaa.aac                                    ← صوت منفصل
+        // ملاحظة: رصد حي 2026-09-07 — الـ master (u.hls.url) قد يعيد 403 "Access denied"
+        // من بعض المناطق (Rumble لا يخدّم playlist.m3u8 إلا بسكشن مؤكد). لكن الـ
+        // tar chunklist (.oaa.tar?r_file=chunklist.m3u8) يعمل 200 دائمًا بمقاطع TS حقيقية
+        // (sync 0x47 عند offset، حزم 188 بايت) — هذا ما يستخدمه مشغّل الموقع فعلاً.
+        // لذا نُصدّر الـ tar كرابط التشغيل الموثوق، والـ master كخيار فقط إن وُجد.
         val uNode = extractJsonObject(cleaned, "\"u\"")
         val hls = uNode?.get("hls")?.get("url")?.asText()?.takeIf { it.isNotBlank() }
+        // الـ tar: chunklist الحقيقي القابل للتشغيل (r_file=chunklist.m3u8).
+        val tar = uNode?.get("tar")?.get("url")?.asText()?.takeIf { it.isNotBlank() }
+        // جودة الـ tar من meta (w×h) لتسمية الرابط بدقة.
+        val tarMeta = uNode?.get("tar")?.get("meta")
+        val tarH = tarMeta?.get("h")?.asInt() ?: 0
+        val tarW = tarMeta?.get("w")?.asInt() ?: 0
 
         // الترجمات: Rumble يقدّم كائن "cc":{lang:{language,path}} أو مصفوفة [] (بلا ترجمة).
         val subs = mutableListOf<SubtitleTrack>()
@@ -174,19 +188,85 @@ class DeepDramaProvider : MainAPI() {
             // مصفوفة [] = لا ترجمة؛ نتجاهل.
         }
 
-        // جودات Rumble: لا نجلب الـ master هنا (درس v2/v3 — النافذة ضيقة وRumble
-        // بطيء). نصدّر الـ master التكيفي نفسه فقط، فيتولى المشغّل التكيّف بين
-        // الجودات تلقائيًا. (المعلومات الكاملة في التعليق أعلى: الخادم يقدّم
-        // جودات متعددة داخل الـ master الواحد.)
-        // ملاحظة: لا نستخدم timeline.mp4 (180x320 معاينة) بأي حال — ليس بالفيلم الكامل.
+        // جودات Rumble: نُصدّر الـ tar chunklist الحقيقي (يعمل 200) كرابط التشغيل
+// الأساسي، والـ master التكيفي (إن وُجد) كخيار إضافي. لا نستخدم timeline.mp4
+// (180x320 معاينة) بأي حال — ليس بالفيلم الكامل.
+        val extra = mutableListOf<ServerRendition>()
+        if (tar != null) {
+            extra.add(ServerRendition(tar, tarH, 0))
+        }
         val resolved = ServerResolved(
             name = "Rumble",
             hls = hls,
-            renditions = emptyList(),  // الجودات داخل الـ master نفسه؛ لا فكّ هنا.
+            renditions = emptyList(),  // الجودات داخل الـ master نفسه (إن عمل)؛ لا فكّ هنا.
             subtitles = subs,
             directVideo = null,  // لا ملف mp4 كامل مباشر عند Rumble — الصحيح هو الـ HLS.
+            extraHls = extra,
+            altLabel = if (tarW > 0 && tarH > 0) "${tarW}x${tarH}" else "360p",
         )
         resolveCache["rumble:$embedUrl"] = resolved
+        return resolved
+    }
+
+    // ---------- voe.sx ----------
+
+    /**
+     * يجلب روابط voe.sx (مخزّنة). voe يعتمد نمط rotator متقلّب:
+     *  - /e/{id} يعيد صفحة تحوّل JS إلى خادم متغيّر (مثل eugenemakedraw.com)
+     *    مع معامل permanentToken من localStorage.
+     *  - ذاك الخادم يعطي صيغة HLS/مسارات عامة، لكنه قد يكون معطّلاً (NXDOMAIN)
+     *    في كثير من الأوقات (رصد حي 2026-09-07: eugenemakedraw.com لا يحل DNS).
+     * نُحاول الفكّ بالطرق الشائعة، ونفشل بهدوء (ServerResolved فارغ) لتغطية
+     * الحالة حيث voe لا يقدم شيئًا — ويبقى vidaraa/rumble بديلين عاملين.
+     */
+    private suspend fun resolveVoe(embedUrl: String): ServerResolved {
+        resolveCache["voe:$embedUrl"]?.let { return it }
+        var hls: String? = null
+        var renditions = emptyList<ServerRendition>()
+        var direct: String? = null
+        try {
+            // 1) نقرأ صفحة الـ embed لنستخرج وجهة الـ rotator (إن حُلّ).
+            val page = app.get(embedUrl, headers = headers()).text
+            val cleaned = page.replace("\\/", "/")
+
+            // 2) بعض النسخ تكشف master/مسارات مباشرة داخل الصفحة (url في سكربت).
+            val m3u8 = Regex("""(https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*)""").find(cleaned)?.groupValues?.get(1)
+            val mp4 = Regex("""(https?://[^"'\s<>]+?\.mp4[^"'\s<>]*)""").find(cleaned)?.groupValues?.get(1)
+
+            // 3) rotator: معلمة permanentToken → نُكمل إلى خادم الوجهة ونفكّ منه.
+            var finalUrl = cleaned.substringAfter("window.location.href = '", "").substringBefore("'")
+            if (finalUrl.isBlank()) {
+                val js = Regex("""(?:location|location\.href|window\.location)\s*=\s*["']([^"']+)["']""")
+                    .find(cleaned)?.groupValues?.get(1)
+                finalUrl = js ?: ""
+            }
+            if (finalUrl.startsWith("http")) {
+                try {
+                    val hub = app.get(finalUrl, headers = headers()).text
+                    val hubClean = hub.replace("\\/", "/")
+                    val hubM3u8 = Regex("""(https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*)""").find(hubClean)?.groupValues?.get(1)
+                    if (hubM3u8 != null) hls = hubM3u8
+                    // مسارات mp4 في بعض إصدارات voe
+                    if (mp4 == null) direct = Regex("""(https?://[^"'\s<>]+?\.mp4[^"'\s<>]*)""").find(hubClean)?.groupValues?.get(1)
+                    // بعض النسخ javaScript فيه "source" أو "file"
+                    if (hls == null) {
+                        hls = Regex("""(?:source|file)\s*[:=]\s*["']([^"']+\.m3u8[^"']*)["']""").find(hubClean)?.groupValues?.get(1)
+                    }
+                } catch (_: Exception) { /* جهة rotator معطّلة — نستمر */ }
+            } else if (m3u8 != null || mp4 != null) {
+                hls = m3u8
+                direct = mp4
+            }
+        } catch (_: Exception) { /* voe غير قابل للفك — نرجع فارغًا */ }
+
+        val resolved = ServerResolved(
+            name = "voe",
+            hls = hls?.takeIf { it.isNotBlank() },
+            renditions = emptyList(),
+            subtitles = emptyList(),
+            directVideo = direct?.takeIf { it.isNotBlank() },
+        )
+        resolveCache["voe:$embedUrl"] = resolved
         return resolved
     }
 
@@ -408,28 +488,19 @@ class DeepDramaProvider : MainAPI() {
             val servers = serverButtons(raw)
             if (servers.isEmpty()) return null
 
-            // نصنّف الخوادم: vidaraa (الأساسي/الأسرع) ثم Rumble (البديل).
-            val vidaraa = servers.firstOrNull { it.contains("vidaraa") }
-            val rumble = servers.firstOrNull { it.contains("rumble") }
-            val primary = vidaraa ?: rumble ?: servers.first()
+            // كل أزرار الخوادم كما يعرضها الموقع (vidaraa/rumble/voe...) — نُدرجها كلها
+            // في بيانات الحلقة بترتيب الموقع، لنؤمّن "جميع المشغلات" للاختيار.
+            val bundle = servers.joinToString("|||") { it.substringBefore("?") }
 
-            // بيانات الحلقة: كل روابط الخوادم مفصولة بـ '|||' (لا يظهر في عناوين).
-            // نضع vidaraa أولاً ليكون الخيار الافتراضي (الأسرع استجابة والأعلى جودة).
-            val bundle = buildList {
-                if (vidaraa != null) add(vidaraa.substringBefore("?"))
-                if (rumble != null) add(rumble.substringBefore("?"))
-                if (size == 0) add(primary.substringBefore("?"))
-            }.joinToString("|||")
-
-            // نُسخّن ذاكرة التخزين للخادم الأساسي (vidaraa = الأسرع) أثناء عرض التفاصيل
-            // حتى يكون أول تشغيل فوريًا. Rumble يُسخَّن عند الحاجة في loadLinks
-            // (resolveRumble الآن لا يجلب الـ master — قراءة embed سريعة فقط).
-            // درس سابق (v2/v3): لا نجلب master Rumble داخل loadLinks فلا يتأخر
-            // التشغيل ولا تنكسر الشاشة.
-            (vidaraa ?: rumble ?: primary).substringBefore("?").takeIf { it.isNotBlank() }?.let { warm ->
+            // نُسخّن ذاكرة التخزين للخوادم القابلة للفك (vidaraa/rumble) أثناء عرض
+            // التفاصيل حتى يكون أول تشغيل فوريًا. voe.sx نحاول فكّه عند الحاجة
+            // (خادمه متقلب — rotator قد يعيد توجيه لخادم معطّل؛ لا يُسخَّن هنا).
+            servers.forEach { srv ->
                 try {
-                    if (warm.contains("vidaraa")) resolveVidaraa(warm)
-                    else if (warm.contains("rumble")) resolveRumble(warm)
+                    when {
+                        srv.contains("vidaraa") -> resolveVidaraa(srv.substringBefore("?"))
+                        srv.contains("rumble") -> resolveRumble(srv.substringBefore("?"))
+                    }
                 } catch (_: Exception) { /* تجاهل — يُعاد عند الحاجة في loadLinks */ }
             }
 
@@ -489,6 +560,18 @@ class DeepDramaProvider : MainAPI() {
             })
         }
 
+        // 2b) روابط HLS إضافية قابلة للتشغيل (chunklist Rumble): نعرضها دائمًا
+        //     كخيار مستقل، لأن الـ master قد يكون 403 من بعض المناطق بينما يعمل
+        //     chunklist دائمًا (رصد حي 2026-09-07). هذه جودة المتاح الفعلي.
+        server.extraHls.forEach { x ->
+            val label = if (x.height > 0) "${x.height}p" else (server.altLabel.ifBlank { "جودة" })
+            callback(newExtractorLink(name, "${if (primary) "★ " else ""}$tag · ${label} · chunklist", x.url, ExtractorLinkType.M3U8) {
+                this.quality = getQualityFromName(x.height.takeIf { it > 0 }?.let { "${it}p" } ?: "480p")
+                this.headers = headers()
+                this.referer = "https://rumble.com/"
+            })
+        }
+
         // 3) فيديو مباشر (mp4) إن وُجد فعلاً وقابلاً للتشغيل.
         //    vidaraa: بعض الفيديوات تُخدم كـ mp4 مباشر من streamix.so. هذا النطاق
         //    معطّل حاليًا (521)، لكنه المصدر الوحيد لذلك الفيديو في vidaraa؛ نعرضه
@@ -533,7 +616,7 @@ class DeepDramaProvider : MainAPI() {
         return try {
             if (data.isBlank()) return false
 
-            // بيانات الحلقة: روابط الخوادم مفصولة بـ ||| (vidaraa أولاً = الافتراضي)
+            // بيانات الحلقة: كل روابط الخوادم (video/rumble/voe...) بترتيب الموقع.
             val serverUrls = data.split("|||").map { it.trim() }.filter { it.startsWith("http") && it.isNotBlank() }
             if (serverUrls.isEmpty()) return false
 
@@ -541,20 +624,22 @@ class DeepDramaProvider : MainAPI() {
             // لا نعتمد فقط على الذاكرة المؤقتة (load قد يفشل في تسخينها عند الرجوع
             // السريع)، بل نعيد الفكّ هنا فوراً — لضمان أن التشغيل لا 'ينكسر' عند العودة.
             val resolved = mutableListOf<ServerResolved>()
-            var vidaraaEmitted = false
-            var rumbleEmitted = false
+            val seen = mutableSetOf<String>()
 
             for (s in serverUrls) {
+                val kind = when {
+                    s.contains("vidaraa") -> "vidaraa"
+                    s.contains("rumble") -> "rumble"
+                    s.contains("voe") || s.contains("vfaststream") -> "voe"
+                    else -> "other"
+                }
+                if (!seen.add(kind)) continue  // سيرفر واحد لكل نوع
+
                 val resolvedServer = try {
-                    when {
-                        s.contains("vidaraa") && !vidaraaEmitted -> {
-                            vidaraaEmitted = true
-                            resolveVidaraa(s)
-                        }
-                        s.contains("rumble") && !rumbleEmitted -> {
-                            rumbleEmitted = true
-                            resolveRumble(s)
-                        }
+                    when (kind) {
+                        "vidaraa" -> resolveVidaraa(s)
+                        "rumble" -> resolveRumble(s)
+                        "voe" -> resolveVoe(s)
                         else -> null
                     }
                 } catch (_: Exception) { null }
@@ -562,13 +647,10 @@ class DeepDramaProvider : MainAPI() {
                 if (resolvedServer != null) {
                     // نبثّ هذا الخادم فور حلّه، قبل الانتظار على الخادم الآخر —
                     // فيبدأ الفيديو بسرعة ولا ينتظر المحاولتين معاً.
-                    emitServer(resolvedServer, resolved.isEmpty(), subtitleCallback, callback)
-                    // نعتبر الخادم "حُلّ" إذا قدّم شيئًا قابلًا للتشغيل: HLS أو جودات
-                    // أو mp4 مباشر (حتى لو معطلاً الآن، Rumble سيغطيه كبديل).
-                    if (resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
-                        resolvedServer.directVideo != null) {
-                        resolved.add(resolvedServer)
-                    }
+                    val anyPlayable = resolvedServer.hls != null || resolvedServer.renditions.isNotEmpty() ||
+                        resolvedServer.directVideo != null || resolvedServer.extraHls.isNotEmpty()
+                    emitServer(resolvedServer, resolved.isEmpty() && anyPlayable, subtitleCallback, callback)
+                    if (anyPlayable) resolved.add(resolvedServer)
                 }
             }
 
@@ -580,7 +662,7 @@ class DeepDramaProvider : MainAPI() {
                 // مسار vidaraa/rumble مُجدداً (ربما كان فشلٌ عابر في الشبكة).
                 val first = serverUrls.firstOrNull()
                 if (first != null) {
-                    val retry = if (first.contains("rumble")) resolveRumble(first) else resolveVidaraa(first)
+                    val retry = if (first.contains("rumble")) resolveRumble(first) else if (first.contains("vidaraa")) resolveVidaraa(first) else resolveVoe(first)
                     emitServer(retry, true, subtitleCallback, callback)
                 }
             }
