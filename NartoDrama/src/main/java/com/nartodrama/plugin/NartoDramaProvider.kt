@@ -386,7 +386,10 @@ class NartoDramaProvider : MainAPI() {
             fun jwtSrc(u: String): String? {
                 return try {
                     val jwt = u.substringAfter("/e/m/").substringBefore("?")
-                    val payloadB64 = jwt.substringAfter('.', "").substringBefore('.').takeIf { it.isNotBlank() }
+                    // JWT is often signed-compact (payload.signature, NO header) — the FIRST
+                    // dot-part is always the payload; using substringAfter('.') grabbed the
+                    // signature as the payload on two-part tokens → gibberish → null → no links.
+                    val payloadB64 = jwt.substringBefore('.').takeIf { it.isNotBlank() }
                         ?: return null
                     val bytes = try {
                         java.util.Base64.getUrlDecoder().decode(payloadB64)
