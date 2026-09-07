@@ -2,7 +2,7 @@ android {
     namespace = "com.nartoedge.plugin"
 }
 
-version = 14
+version = 15
 
 cloudstream {
     description = "Edge Narto Drama - مسلسلات دراما مترجمة"

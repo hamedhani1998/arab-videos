@@ -337,12 +337,52 @@ class NartoDramaProvider : MainAPI() {
             var any = false
             var skippedDead = 0
 
+            // shortmax-stream stores one signed token per episode; the ingest drops them at
+            // ARBITRARY times (most are already 410 "link expired" even inside the exp window,
+            // 2026-09-07 audit: 7/8 sampled tokens dead). Don't hand the player a dead master:
+            // probe it (range GET) and skip 410/403. This kills the "plays a bit then spins on
+            // a dead token" failure mode.
+            fun isAlive(u: String): Boolean {
+                val isShortmax = u.contains("shortmax-stream")
+                val isProxy = u.contains("/e/m/")
+                val probeBody = isProxy   // proxy 200s even when its src is "link expired"
+                if (!isShortmax && !isProxy) return true
+                return try {
+                    val httpConn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+                    httpConn.apply {
+                        requestMethod = "GET"
+                        setRequestProperty("Referer", nartoOrigin)
+                        setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10)")
+                        if (!probeBody) setRequestProperty("Range", "bytes=0-1")
+                        else setRequestProperty("Range", "bytes=0-255")
+                        connectTimeout = 3500
+                        readTimeout = 3000
+                        instanceFollowRedirects = true
+                    }
+                    val code = httpConn.responseCode
+                    if (code !in 200..399) { httpConn.inputStream?.close(); return false }
+                    if (probeBody) {
+                        val body = httpConn.inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+                        httpConn.inputStream?.close()
+                        !body.contains("link expired")
+                    } else {
+                        httpConn.inputStream?.close()
+                        true
+                    }
+                } catch (e: Exception) { false }
+            }
+
             suspend fun emit(u: String, label: String, q: String) {
                 if (u.isBlank() || !emitted.add(u)) return
                 val host = u.substringAfter("//").substringBefore("/").substringBefore(":").lowercase()
                 if (DEAD_HOST_PATTERNS.any { host.contains(it) }) {
                     skippedDead++
                     android.util.Log.e("NartoDrama", "emit SKIP dead host $host ($label)")
+                    return
+                }
+                if (!isAlive(u)) {
+                    skippedDead++
+                    android.util.Log.e("NartoDrama", "emit SKIP dead shortmax token $host ($label)")
                     return
                 }
                 val type = inferStreamType(u)
@@ -407,13 +447,24 @@ class NartoDramaProvider : MainAPI() {
             suspend fun emitFromProxy(proxyUrl: String) {
                 val src = jwtSrc(proxyUrl) ?: return
                 if (!src.contains("/e/m/")) {
-                    emit(src, "كامل", proxyQuality(src))
+                    // If the proxy resolves to an akamai shorttv master, its segments are
+                    // `main/segment-N.ts` WITHOUT the auth_key → the raw master 403s mid-play.
+                    // The stream-e1 proxy re-wraps each segment as /e/s/{jwt} (with auth), so for
+                    // akamai the SAFE link is the proxy itself, not the raw src.
+                    if (src.contains("akamai-static.shorttv.live")) {
+                        emit(proxyUrl, "كامل", "480p")
+                    } else {
+                        emit(src, "كامل", proxyQuality(src))
+                    }
                 }
-                // shortmax/akamai: same uuid serves 480/720/1080 with one auth_key (verified 200).
+                // shortmax: same uuid serves 480/720/1080 with one auth_key (verified 200).
                 // CRITICAL: path uses `{uuid}_{q}/main.m3u8` with NO `p` — verified live that
                 // `_720p`/`_1080p` return HTTP 403 while `_720`/`_1080` return 200. The label keeps
                 // the `p` for display but the URL must NOT contain it.
                 val m = Regex("""(.+?)_(\d{3,4})(?:p)?/main\.m3u8(\?.*)""").find(src) ?: return
+                // akamai raw variants would 403 on their auth-less segments — for akamai the
+                // proxy re-wrap (emitted above) is the ONLY safe link, so do NOT add raw variants.
+                if (src.contains("akamai-static.shorttv.live")) return
                 val base = m.groupValues[1]             // .../hls/{uuid}
                 val query = m.groupValues[3]            // ?auth_key=...
                 val baseQ = m.groupValues[2].toIntOrNull() ?: 480
@@ -441,6 +492,7 @@ class NartoDramaProvider : MainAPI() {
                 .distinct()
 
             var directEmitted = 0
+            var directOk = 0
             for (u in directs) {
                 if (directEmitted >= 2) break
                 // v43: on slow CDNs (shortmax-stream) a 1080 master's 1.7MB segments drain the
@@ -455,11 +507,14 @@ class NartoDramaProvider : MainAPI() {
                         ?.streamUrl
                         ?.takeIf { it.isNotBlank() }
                 } else null
+                val before = emitted.size
                 emit(picked ?: u, "كامل", picked?.let { proxyQuality(it) } ?: proxyQuality(u))
+                if (emitted.size > before) directOk++
                 directEmitted++
             }
-            if (directEmitted == 0) {
-                // No direct CDN host — last resort is the proxy; decode it to the real host.
+            if (directOk == 0) {
+                // No live direct CDN host survived the probe (dead shortmax tokens) — fall back
+                // to the proxy (stream-e1 /e/m) which may still be alive; decode it to its src.
                 val p = proxies.firstOrNull()
                 if (p != null) emitFromProxy(p)
             }
